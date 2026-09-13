@@ -1,0 +1,36 @@
+[package]
+name = "efficiency_toolbox"
+version = "0.1.0"
+description = "本地优先的文档办公与效率工具工作台"
+authors = ["效率百宝箱"]
+edition = "2021"
+
+[lib]
+name = "efficiency_toolbox_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2.0.0", features = [] }
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tauri = { version = "2.0.0", features = [] }
+tauri-plugin-dialog = "2"
+tauri-plugin-deep-link = "2.4.10"
+url = "2"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+tokio = { version = "1", features = ["macros", "time"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
+
+[dev-dependencies]
+sha2 = "0.10"
+
+[features]
+custom-protocol = ["tauri/custom-protocol"]
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = "symbols"
+panic = "abort"

@@ -1,0 +1,21 @@
+# Dependencies and build output
+node_modules/
+dist/
+src-tauri/target/
+
+# Local test sessions and temporary work files
+tmp/
+.playwright-cli/
+*.log
+
+# Generated validation/performance evidence is kept locally, not in source control.
+output/playwright/
+output/validation/
+output/performance/
+
+# OCR model downloads are fetched on demand by the application.
+*.traineddata
+
+# Python bytecode caches
+__pycache__/
+*.py[cod]
