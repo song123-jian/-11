@@ -26,6 +26,7 @@ export const OPERATION_LABELS = Object.freeze({
   'crypto-decrypt': 'OpenPGP 文件解密',
   'relay-test': '中转站连接测试',
   'relay-assistant': '中转站 AI 助手',
+  translation: '翻译助手',
   unknown: '历史任务',
 })
 

@@ -3,6 +3,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import {
   Archive,
   ArrowDown,
+  ArrowLeftRight,
   ArrowRight,
   ArrowUp,
   Barcode,
@@ -11,8 +12,6 @@ import {
   Calculator,
   Check,
   CheckCircle2,
-  ChevronLeft,
-  ChevronRight,
   ClipboardList,
   Clock3,
   Copy,
@@ -28,6 +27,7 @@ import {
   Image as ImageIcon,
   KeyRound,
   LayoutGrid,
+  Languages,
   LockKeyhole,
   Menu,
   MoreHorizontal,
@@ -82,6 +82,7 @@ import { buildDependencyStatus } from './services/dependencyTools'
 import { describeDocumentSelection, formatDocumentFileSize, selectDocumentFiles } from './services/fileQueueTools'
 import { authorizeOnlineAction, consentedScopes, createConsentDisclosure, grantConsent, isConsentGranted, normalizeConsent, revokeAllConsent } from './services/privacyConsent'
 import { applyDeepSeekPreset, callRelayChat, clearRelayApiKey, DEEPSEEK_RELAY_PRESET, isDeepSeekPreset, loadRelayConfig, maskRelayApiKey, saveRelayConfig, testRelayConnection } from './services/relayApi'
+import { TRANSLATION_LANGUAGES, TRANSLATION_MAX_CHARACTERS, TRANSLATION_STYLES, buildTranslationMessages, canSwapTranslationLanguages, normalizeTranslationPreferences, safeTranslationTitle, translationPreferenceSummary, validateTranslationText } from './services/translationTools'
 import { buildCcSwitchProviderLink, ccSwitchProviderJson, parseCcSwitchProviderLink } from './services/ccSwitch.js'
 import { filterSearchTools, normalizeSearchIndex, stepSearchIndex } from './services/searchTools'
 import { normalizeRecentTools, normalizeTheme } from './services/localStateModels'
@@ -92,6 +93,7 @@ import ImageWorkspace from './components/ImageWorkspace.vue'
 import ShutdownWorkspace from './components/ShutdownWorkspace.vue'
 import PrintWorkspace from './components/PrintWorkspace.vue'
 import ToolWorkspace from './components/ToolWorkspace.vue'
+import ToolEntryCard from './components/ToolEntryCard.vue'
 import TableWorkspace from './components/TableWorkspace.vue'
 
 const modules = [
@@ -152,12 +154,25 @@ const tools = [
 // an id, module, label, description and icon to appear in search and the command palette.
 const toolRegistry = createToolRegistry(tools)
 const imageTools = tools.filter((tool) => tool.module === 'image')
+const docToolIds = ['pdf-merge', 'pdf-split', 'rename', 'archive', 'office-pdf', 'print', 'templates', 'ocr']
+const dataToolIds = ['unit', 'date', 'percentage', 'calculator', 'table-data', 'exchange', 'mortgage', 'tax', 'bmi']
+const networkToolIds = ['qr', 'barcode', 'speed', 'ip', 'ping', 'port']
 const imageToolIds = ['image-compress', 'screenshot', 'long-screenshot', 'watermark', 'stitch', 'image-ai', 'id-photo', 'image-text-edit']
+const securityToolIds = ['password', 'password-strength', 'crypto', 'redact']
 const advancedImageToolIds = new Set(['image-ai', 'id-photo', 'image-text-edit'])
 
-const initialUiPrefs = normalizeUiPrefs(loadState('ui-prefs', DEFAULT_UI_PREFS), toolRegistry.ids())
+const storedUiPrefs = loadState('ui-prefs', DEFAULT_UI_PREFS)
+const initialUiPrefs = normalizeUiPrefs(storedUiPrefs, toolRegistry.ids())
+const initialTranslationPrefs = normalizeTranslationPreferences(storedUiPrefs?.translation)
 const initialToolDefinition = toolRegistry.get(initialUiPrefs.lastTool)
+const assistantToolTabs = {
+  todo: 'todos',
+  pomodoro: 'focus',
+  reminder: 'reminders',
+  'relay-assistant': 'ai',
+}
 const activeModule = ref(initialToolDefinition?.module || 'home')
+const assistantActiveTab = ref(assistantToolTabs[initialToolDefinition?.id] || 'overview')
 const searchText = ref('')
 const searchFocused = ref(false)
 const searchActiveIndex = ref(-1)
@@ -202,6 +217,14 @@ const relayModels = ref([])
 const relayPrompt = ref('')
 const relayResult = ref(null)
 const relayBusy = ref(false)
+const translationSourceLanguage = ref(initialTranslationPrefs.sourceLanguage)
+const translationTargetLanguage = ref(initialTranslationPrefs.targetLanguage)
+const translationStyle = ref(initialTranslationPrefs.style)
+const translationPreserveFormatting = ref(initialTranslationPrefs.preserveFormatting)
+const translationText = ref('')
+const translationResult = ref(null)
+const translationStatus = ref(null)
+const translationBusy = ref(false)
 const ccSwitchLinkInput = ref('')
 const ccSwitchImportPreview = ref(null)
 const ccSwitchImportError = ref('')
@@ -264,7 +287,7 @@ const toolSearchAliases = {
 const searchResults = computed(() => {
   return filterSearchTools(toolRegistry.list(), searchText.value, recentTools.value, toolSearchAliases)
 })
-// 快速开始：最近使用的工具排在前面，不足 8 个时用其余工具按注册表顺序补足。
+// 快速开始：最近使用的工具排在前面，其余工具按注册表顺序完整展示。
 const quickTools = computed(() => {
   const ordered = []
   const seen = new Set()
@@ -276,14 +299,14 @@ const quickTools = computed(() => {
     }
   }
   for (const tool of tools) {
-    if (ordered.length >= 8) break
     if (!seen.has(tool.id)) {
       seen.add(tool.id)
       ordered.push(tool)
     }
   }
-  return ordered.slice(0, 8)
+  return ordered
 })
+const recentToolDefinitions = computed(() => recentTools.value.map((id) => toolRegistry.get(id)).filter(Boolean))
 const commandDefinitions = computed(() => [
   { id: 'toggle-sidebar', label: sidebarCollapsed.value ? '展开侧栏' : '折叠侧栏', description: '在 234px 导航与 64px 图标轨之间切换', icon: sidebarCollapsed.value ? PanelLeftOpen : PanelLeftClose, keywords: ['sidebar', '导航', '图标轨'] },
   { id: 'toggle-task-panel', label: taskPanelPinned.value ? '取消固定任务中心' : '固定任务中心', description: '将任务中心作为右侧第三栏显示', icon: taskPanelPinned.value ? PinOff : Pin, keywords: ['任务', '第三栏', 'pin'] },
@@ -390,7 +413,7 @@ function toolAccess(toolId) {
   if (desktopToolIds.has(toolId)) return { label: '桌面版', className: 'desktop' }
   if (pluginToolIds.has(toolId)) return { label: '需插件', className: 'plugin' }
   if (onlineToolIds.has(toolId)) return { label: '需联网', className: 'online' }
-  return { label: '离线', className: 'offline' }
+  return { label: '上线', className: 'available' }
 }
 
 function describeRelayProvider(config) {
@@ -809,6 +832,12 @@ function persistUiPrefs() {
     density: uiDensity.value,
     lastTool: activeTool.value,
     taskPanelPinned: taskPanelPinned.value,
+    translation: normalizeTranslationPreferences({
+      sourceLanguage: translationSourceLanguage.value,
+      targetLanguage: translationTargetLanguage.value,
+      style: translationStyle.value,
+      preserveFormatting: translationPreserveFormatting.value,
+    }),
   })
 }
 
@@ -823,12 +852,6 @@ function toggleTaskPanelPin() {
   taskPanelOpen.value = true
   persistUiPrefs()
   showToast(taskPanelPinned.value ? '任务中心已固定为第三栏' : '任务中心已取消固定', 'info')
-}
-
-function scrollTabs(id, direction) {
-  const row = document.getElementById(id)
-  if (!row) return
-  row.scrollBy({ left: direction * Math.max(180, Math.round(row.clientWidth * 0.72)), behavior: 'smooth' })
 }
 
 function openCommandPalette() {
@@ -909,7 +932,12 @@ function selectModule(id) {
   boundaryBarDismissed.value = false
   if (id !== 'home') {
     const first = tools.find((tool) => tool.module === id)
-    if (first) activeTool.value = first.id
+    if (first) {
+      const nextToolId = id === 'docs' && docBusy.value ? docMode.value : first.id
+      activeTool.value = nextToolId
+      if (id === 'docs' && !docBusy.value) openDocMode(nextToolId)
+      if (id === 'assistant') assistantActiveTab.value = assistantToolTabs[first.id] || 'overview'
+    }
   }
 }
 
@@ -920,6 +948,7 @@ function selectTool(tool) {
   }
   activeModule.value = tool.module
   activeTool.value = tool.id
+  if (tool.module === 'assistant') assistantActiveTab.value = assistantToolTabs[tool.id] || 'overview'
   boundaryBarDismissed.value = false
   if (tool.module === 'docs') openDocMode(tool.id)
   searchFocused.value = false
@@ -930,7 +959,7 @@ function selectTool(tool) {
   persistUiPrefs()
 }
 
-// 模块内通过工具 Tab 切换时同样记录最近使用，但不触发模块跳转与忙碌拦截，
+// 模块内通过工具卡片切换时同样记录最近使用，但不触发模块跳转与忙碌拦截，
 // 这样首页“快速开始 / 最近使用”在任意入口进入工具后都保持一致。
 function rememberRecentTool(id) {
   if (!id) return
@@ -1287,7 +1316,7 @@ watch(commandQuery, () => {
   commandActiveIndex.value = 0
 })
 
-watch([sidebarCollapsed, uiDensity, taskPanelPinned, activeTool], persistUiPrefs)
+watch([sidebarCollapsed, uiDensity, taskPanelPinned, activeTool, translationSourceLanguage, translationTargetLanguage, translationStyle, translationPreserveFormatting], persistUiPrefs)
 
 onMounted(() => {
   document.documentElement.dataset.theme = theme.value
@@ -1325,7 +1354,7 @@ onBeforeUnmount(() => {
 })
 
 // Document tools
-const docMode = ref('pdf-merge')
+const docMode = ref(initialToolDefinition?.module === 'docs' && docToolIds.includes(initialToolDefinition.id) ? initialToolDefinition.id : 'pdf-merge')
 const docFiles = ref([])
 const renamePattern = ref('文件-{n}')
 const splitPage = ref('1-2')
@@ -2446,6 +2475,104 @@ async function runRelayAssistant() {
   })
 }
 
+function swapTranslationLanguages() {
+  if (!canSwapTranslationLanguages(translationSourceLanguage.value, translationTargetLanguage.value)) {
+    showToast('自动识别语言后才能交换，请先手动选择源语言', 'info')
+    return
+  }
+  const source = translationSourceLanguage.value
+  translationSourceLanguage.value = translationTargetLanguage.value
+  translationTargetLanguage.value = source
+  translationResult.value = null
+  translationStatus.value = null
+}
+
+function clearTranslation() {
+  if (translationBusy.value) return
+  translationText.value = ''
+  translationResult.value = null
+  translationStatus.value = null
+}
+
+async function runTranslation() {
+  if (translationBusy.value) return
+  let sourceText
+  try {
+    sourceText = validateTranslationText(translationText.value, TRANSLATION_MAX_CHARACTERS)
+  } catch (error) {
+    translationStatus.value = { type: 'error', message: error.message || '翻译原文无效' }
+    showToast(translationStatus.value.message, 'error')
+    return
+  }
+  if (!relayConfigured.value) {
+    openApiSettings()
+    showToast('请先在设置中补全中转站 API 配置', 'error')
+    return
+  }
+
+  const preferences = {
+    sourceLanguage: translationSourceLanguage.value,
+    targetLanguage: translationTargetLanguage.value,
+    style: translationStyle.value,
+    preserveFormatting: translationPreserveFormatting.value,
+  }
+  const config = { ...relayConfig.value }
+  const disclosure = relayConsentDisclosure('translation', config, {
+    data: `API Key、模型名、${translationPreferenceSummary(preferences)} 及原文 ${sourceText.length} 个字符`,
+    purpose: '调用已配置的 AI 模型生成翻译结果',
+  })
+  const authorization = await runAuthorizedOnlineAction(disclosure, () => {
+    translationBusy.value = true
+    translationResult.value = null
+    translationStatus.value = { type: 'info', message: '正在准备翻译请求…' }
+    const task = startTask({
+      operation: 'translation',
+      label: '翻译助手',
+      initialStage: '准备翻译请求',
+      onlineDisclosure: disclosure,
+      worker: async ({ signal, onProgress, reportStatus, requestId }) => {
+        reportStatus({ stage: '准备翻译请求' })
+        onProgress(10)
+        const cancelDesktopJob = () => { void cancelNetworkJob(requestId).catch(() => {}) }
+        signal.addEventListener('abort', cancelDesktopJob, { once: true })
+        try {
+          reportStatus({ stage: '翻译中' })
+          translationStatus.value = { type: 'info', message: '正在翻译…' }
+          onProgress(25)
+          const result = await callRelayChat(config, {
+            messages: buildTranslationMessages({ text: sourceText, ...preferences }),
+            temperature: 0.1,
+            maxTokens: 4096,
+            signal,
+            requestId,
+          })
+          onProgress(95)
+          reportStatus({ stage: '整理翻译结果' })
+          return result
+        } finally {
+          signal.removeEventListener('abort', cancelDesktopJob)
+        }
+      },
+      resultMessage: '翻译已完成',
+      onSuccess: (result) => {
+        translationResult.value = result
+        translationStatus.value = { type: 'success', message: `翻译完成 · ${translationPreferenceSummary(preferences)}` }
+      },
+      onFailure: (error) => {
+        translationStatus.value = { type: 'error', message: error.message || '翻译失败' }
+      },
+      onSettled: (status) => {
+        translationBusy.value = false
+        if (status === 'canceled') translationStatus.value = { type: 'info', message: '翻译已取消，未生成结果' }
+      },
+    })
+    if (!task) translationBusy.value = false
+  })
+  if (!authorization.started && authorization.reason === 'denied') {
+    translationStatus.value = { type: 'info', message: '未获得翻译联网授权，未发送任何请求' }
+  }
+}
+
 const statusLabel = computed(() => {
   if (networkOnline.value === false) return runningTasks.value.length ? `当前离线 · ${runningTasks.value.length} 个任务进行中` : '当前离线'
   return runningTasks.value.length ? `${runningTasks.value.length} 个任务进行中` : (runtimeMode.value === 'tauri' ? '桌面模式' : '浏览器本地模式')
@@ -2525,13 +2652,18 @@ const statusLabel = computed(() => {
             <div class="hero-status"><ShieldCheck :size="18" /><span>隐私边界已启用</span></div>
           </div>
 
-          <div class="section-header"><div><h2>快速开始</h2><p>最近使用的工具排在前面，其余按功能顺序补足；也可用 Ctrl+K 全局搜索。</p></div><span class="section-meta">最近优先</span></div>
+          <div class="section-header"><div><h2>快速开始</h2><p>最近使用的工具排在前面，其余功能按注册顺序完整展示；也可用 Ctrl+K 全局搜索。</p></div><span class="section-meta">全部功能</span></div>
           <div class="quick-grid">
-            <button v-for="tool in quickTools" :key="tool.id" class="quick-card" type="button" @click="selectTool(tool)">
-              <span class="quick-icon"><component :is="tool.icon" :size="19" /></span>
-              <span class="quick-copy"><strong>{{ tool.label }}</strong><small>{{ tool.description }}</small></span>
-              <span class="access-tag" :class="toolAccess(tool.id).className">{{ toolAccess(tool.id).label }}</span>
-            </button>
+            <ToolEntryCard
+              v-for="tool in quickTools"
+              :key="tool.id"
+              :label="tool.label"
+              :description="tool.description"
+              :icon="tool.icon"
+              :status="toolAccess(tool.id).label"
+              :status-class="toolAccess(tool.id).className"
+              @click="selectTool(tool)"
+            />
           </div>
 
           <section class="image-zone" aria-labelledby="image-zone-title">
@@ -2544,23 +2676,33 @@ const statusLabel = computed(() => {
               <button class="outline-button" type="button" @click="selectModule('image')"><ImageIcon :size="15" aria-hidden="true" /> 打开图像工作台</button>
             </div>
             <div class="image-zone-grid">
-              <button v-for="tool in imageTools" :key="tool.id" class="image-zone-item" type="button" @click="selectTool(tool)">
-                <span class="image-zone-icon"><component :is="tool.icon" :size="18" aria-hidden="true" /></span>
-                <span class="image-zone-copy"><strong>{{ tool.label }}</strong><small>{{ tool.description }}</small></span>
-                <span class="access-tag" :class="toolAccess(tool.id).className">{{ toolAccess(tool.id).label }}</span>
-                <ArrowRight :size="15" aria-hidden="true" />
-              </button>
+              <ToolEntryCard
+                v-for="tool in imageTools"
+                :key="tool.id"
+                :label="tool.label"
+                :description="tool.description"
+                :icon="tool.icon"
+                :status="toolAccess(tool.id).label"
+                :status-class="toolAccess(tool.id).className"
+                @click="selectTool(tool)"
+              />
             </div>
           </section>
 
           <div class="home-grid">
             <section class="content-card recent-card" aria-labelledby="recent-title">
               <div class="card-heading"><div><h2 id="recent-title">最近使用</h2><p>只保存工具元数据，不保存文档正文。</p></div><MoreHorizontal :size="18" aria-hidden="true" /></div>
-              <div class="recent-list">
-                <button v-for="id in recentTools" :key="id" class="recent-item" type="button" @click="useToolById(id)">
-                  <component :is="tools.find((tool) => tool.id === id)?.icon || FileText" :size="17" />
-                  <span>{{ tools.find((tool) => tool.id === id)?.label || id }}</span><span class="access-tag" :class="toolAccess(id).className">{{ toolAccess(id).label }}</span><ArrowRight :size="15" />
-                </button>
+              <div class="recent-list tool-entry-grid">
+                <ToolEntryCard
+                  v-for="tool in recentToolDefinitions"
+                  :key="tool.id"
+                  :label="tool.label"
+                  :description="tool.description"
+                  :icon="tool.icon"
+                  :status="toolAccess(tool.id).label"
+                  :status-class="toolAccess(tool.id).className"
+                  @click="useToolById(tool.id)"
+                />
               </div>
             </section>
             <section class="content-card offline-card" aria-labelledby="offline-title">
@@ -2585,15 +2727,21 @@ const statusLabel = computed(() => {
 
           <div v-if="activeModule === 'docs'" class="workspace-grid">
             <ToolWorkspace aria-labelledby="doc-tool-title">
-              <div class="tab-scroller">
-                <button class="icon-button tab-scroll-button" type="button" aria-label="向左滚动文档工具" title="向左滚动" @click="scrollTabs('docs-tool-tabs', -1)"><ChevronLeft :size="16" /></button>
-                <div id="docs-tool-tabs" class="tool-tabs tab-scroll-row" role="tablist" aria-label="文档工具">
-                <button v-for="mode in ['pdf-merge', 'pdf-split', 'rename', 'archive', 'office-pdf', 'print', 'templates', 'ocr']" :key="mode" class="tool-tab" :class="{ active: docMode === mode }" type="button" role="tab" :disabled="docBusy" :aria-selected="docMode === mode" @click="openDocMode(mode)">
-                  <component :is="tools.find((tool) => tool.id === mode)?.icon || FileText" :size="15" />
-                  {{ tools.find((tool) => tool.id === mode)?.label }}
-                </button>
-                </div>
-                <button class="icon-button tab-scroll-button" type="button" aria-label="向右滚动文档工具" title="向右滚动" @click="scrollTabs('docs-tool-tabs', 1)"><ChevronRight :size="16" /></button>
+              <div class="tool-entry-grid module-tool-grid" role="tablist" aria-label="文档工具">
+                <ToolEntryCard
+                  v-for="mode in docToolIds"
+                  :key="mode"
+                  role="tab"
+                  :aria-selected="docMode === mode"
+                  :active="docMode === mode"
+                  :disabled="docBusy"
+                  :label="toolRegistry.get(mode)?.label || mode"
+                  :description="toolRegistry.get(mode)?.description || ''"
+                  :icon="toolRegistry.get(mode)?.icon || FileText"
+                  :status="toolAccess(mode).label"
+                  :status-class="toolAccess(mode).className"
+                  @click="openDocMode(mode)"
+                />
               </div>
 
               <div class="tool-title-row">
@@ -2664,14 +2812,22 @@ const statusLabel = computed(() => {
 
           <div v-else-if="activeModule === 'data'" class="workspace-grid data-workspace">
             <ToolWorkspace>
-              <div class="tool-title-row"><div><h2>{{ tools.find((tool) => tool.id === activeTool)?.label || '数据计算' }}</h2><p>{{ tools.find((tool) => tool.id === activeTool)?.description || '本地规则型结果标注依据；汇率仅在点击后联网并显示数据日期。' }}</p></div><span :class="activeTool === 'exchange' ? 'online-chip' : 'offline-chip'"><Gauge :size="13" /> {{ activeTool === 'exchange' ? '显式联网' : '离线可用' }}</span></div>
-              <div class="tab-scroller">
-                <button class="icon-button tab-scroll-button" type="button" aria-label="向左滚动计算工具" title="向左滚动" @click="scrollTabs('data-tool-tabs', -1)"><ChevronLeft :size="16" /></button>
-                <div id="data-tool-tabs" class="calc-tabs tab-scroll-row" role="tablist" aria-label="计算工具">
-                <button v-for="id in ['unit', 'date', 'percentage', 'calculator', 'table-data', 'exchange', 'mortgage', 'tax', 'bmi']" :key="id" type="button" role="tab" :aria-selected="activeTool === id" :class="{ active: activeTool === id }" @click="rememberRecentTool(id)">{{ tools.find((tool) => tool.id === id)?.label }}</button>
-                </div>
-                <button class="icon-button tab-scroll-button" type="button" aria-label="向右滚动计算工具" title="向右滚动" @click="scrollTabs('data-tool-tabs', 1)"><ChevronRight :size="16" /></button>
+              <div class="tool-entry-grid module-tool-grid" role="tablist" aria-label="计算工具">
+                <ToolEntryCard
+                  v-for="id in dataToolIds"
+                  :key="id"
+                  role="tab"
+                  :aria-selected="activeTool === id"
+                  :active="activeTool === id"
+                  :label="toolRegistry.get(id)?.label || id"
+                  :description="toolRegistry.get(id)?.description || ''"
+                  :icon="toolRegistry.get(id)?.icon || Gauge"
+                  :status="toolAccess(id).label"
+                  :status-class="toolAccess(id).className"
+                  @click="rememberRecentTool(id)"
+                />
               </div>
+              <div class="tool-title-row"><div><h2>{{ tools.find((tool) => tool.id === activeTool)?.label || '数据计算' }}</h2><p>{{ tools.find((tool) => tool.id === activeTool)?.description || '本地规则型结果标注依据；汇率仅在点击后联网并显示数据日期。' }}</p></div><span :class="activeTool === 'exchange' ? 'online-chip' : 'offline-chip'"><Gauge :size="13" /> {{ activeTool === 'exchange' ? '显式联网' : '离线可用' }}</span></div>
 
               <div v-if="activeTool === 'unit'" class="calculator"><div class="form-grid three"><label>类别<select v-model="unitCategory" class="form-control"><option value="length">长度</option><option value="weight">重量</option><option value="temperature">温度</option></select></label><label>数值<input v-model="unitValue" class="form-control" type="number" /></label><label>从<select v-model="fromUnit" class="form-control"><option v-for="item in unitOptions" :key="item.value" :value="item.value">{{ item.label }}</option></select></label><label>到<select v-model="toUnit" class="form-control"><option v-for="item in unitOptions" :key="item.value" :value="item.value">{{ item.label }}</option></select></label></div><div class="result-panel"><span>换算结果</span><strong>{{ Number(unitResult).toLocaleString('zh-CN', { maximumFractionDigits: 8 }) }} {{ unitTables[unitCategory][toUnit][0] }}</strong><small>本地固定换算系数</small></div></div>
               <div v-else-if="activeTool === 'date'" class="calculator">
@@ -2700,10 +2856,21 @@ const statusLabel = computed(() => {
 
           <div v-else-if="activeModule === 'network'" class="workspace-grid">
             <ToolWorkspace>
-              <div class="tab-scroller">
-                <button class="icon-button tab-scroll-button" type="button" aria-label="向左滚动网络工具" title="向左滚动" @click="scrollTabs('network-tool-tabs', -1)"><ChevronLeft :size="16" /></button>
-                <div id="network-tool-tabs" class="tool-tabs tab-scroll-row" role="tablist" aria-label="网络工具"><button v-for="id in ['qr', 'barcode', 'speed', 'ip', 'ping', 'port']" :key="id" class="tool-tab" :class="{ active: activeTool === id }" type="button" role="tab" :aria-selected="activeTool === id" :disabled="networkBusy || barcodeBusy" @click="rememberRecentTool(id)"><component :is="tools.find((tool) => tool.id === id)?.icon || Network" :size="15" />{{ tools.find((tool) => tool.id === id)?.label }}</button></div>
-                <button class="icon-button tab-scroll-button" type="button" aria-label="向右滚动网络工具" title="向右滚动" @click="scrollTabs('network-tool-tabs', 1)"><ChevronRight :size="16" /></button>
+              <div class="tool-entry-grid module-tool-grid" role="tablist" aria-label="网络工具">
+                <ToolEntryCard
+                  v-for="id in networkToolIds"
+                  :key="id"
+                  role="tab"
+                  :aria-selected="activeTool === id"
+                  :active="activeTool === id"
+                  :disabled="networkBusy || barcodeBusy"
+                  :label="toolRegistry.get(id)?.label || id"
+                  :description="toolRegistry.get(id)?.description || ''"
+                  :icon="toolRegistry.get(id)?.icon || Network"
+                  :status="toolAccess(id).label"
+                  :status-class="toolAccess(id).className"
+                  @click="rememberRecentTool(id)"
+                />
               </div>
 
               <template v-if="activeTool === 'qr'">
@@ -2738,10 +2905,21 @@ const statusLabel = computed(() => {
 
           <div v-else-if="activeModule === 'image'" class="workspace-grid">
             <ToolWorkspace>
-              <div class="tab-scroller">
-                <button class="icon-button tab-scroll-button" type="button" aria-label="向左滚动图片工具" title="向左滚动" @click="scrollTabs('image-tool-tabs', -1)"><ChevronLeft :size="16" /></button>
-                <div id="image-tool-tabs" class="tool-tabs image-tool-tabs tab-scroll-row" role="tablist" aria-label="图片工具"><button v-for="id in imageToolIds" :key="id" class="tool-tab" :class="{ active: activeTool === id }" type="button" role="tab" :aria-selected="activeTool === id" :disabled="imageBusy || imageBatchBusy || imageWorkspaceBusy" @click="openImageMode(id)"><component :is="tools.find((tool) => tool.id === id)?.icon || ImageIcon" :size="15" />{{ tools.find((tool) => tool.id === id)?.label }}</button></div>
-                <button class="icon-button tab-scroll-button" type="button" aria-label="向右滚动图片工具" title="向右滚动" @click="scrollTabs('image-tool-tabs', 1)"><ChevronRight :size="16" /></button>
+              <div class="tool-entry-grid module-tool-grid" role="tablist" aria-label="图片工具">
+                <ToolEntryCard
+                  v-for="id in imageToolIds"
+                  :key="id"
+                  role="tab"
+                  :aria-selected="activeTool === id"
+                  :active="activeTool === id"
+                  :disabled="imageBusy || imageBatchBusy || imageWorkspaceBusy"
+                  :label="toolRegistry.get(id)?.label || id"
+                  :description="toolRegistry.get(id)?.description || ''"
+                  :icon="toolRegistry.get(id)?.icon || ImageIcon"
+                  :status="toolAccess(id).label"
+                  :status-class="toolAccess(id).className"
+                  @click="openImageMode(id)"
+                />
               </div>
 
               <ImageWorkspace v-if="isAdvancedImageTool" :mode="activeTool" :runtime-mode="runtimeMode" :start-task="startTask" :run-online-action="runAuthorizedOnlineAction" @busy-change="imageWorkspaceBusy = $event" @notify="showToast" />
@@ -2766,17 +2944,30 @@ const statusLabel = computed(() => {
 
           <div v-else-if="activeModule === 'security'" class="workspace-grid">
             <section class="content-card tool-card">
-              <div class="tool-title-row"><div><h2>密码 · OpenPGP · 敏感脱敏</h2><p>口令与敏感内容只在本机内存中处理，不写入任务历史或本地设置。</p></div><span class="offline-chip"><ShieldCheck :size="13" /> 默认本地</span></div>
-              <div class="security-grid">
-                <div class="security-section"><div class="subheading"><KeyRound :size="16" /><h3>强密码生成</h3></div><div class="form-row"><label for="password-length">长度</label><input id="password-length" v-model="passwordLength" class="form-control short-input" type="number" min="8" max="64" /><span class="field-hint">8-64 位</span></div><div class="option-grid"><label v-for="(enabled, key) in passwordOptions" :key="key" class="check-option"><input v-model="passwordOptions[key]" type="checkbox" /><span>{{ { upper: '大写字母', lower: '小写字母', number: '数字', symbol: '符号' }[key] }}</span></label></div><div class="password-output"><code>{{ generatedPassword || '点击生成，密码不会保存' }}</code><button v-if="generatedPassword" class="icon-button" type="button" aria-label="复制密码" @click="copyText(generatedPassword, '密码已复制，请勿保存到不安全位置')"><Copy :size="16" /></button></div><button class="primary-button" type="button" @click="generatePassword"><KeyRound :size="16" /> 生成密码</button></div>
-                <div class="security-section"><div class="subheading"><LockKeyhole :size="16" /><h3>密码强度检测</h3></div><label for="password-check">仅在本机内存中检测</label><input id="password-check" v-model="passwordToCheck" class="form-control" type="password" autocomplete="new-password" placeholder="输入待检测密码" /><div class="strength-meter"><span :style="{ width: `${Math.min(passwordStrength.score / 6 * 100, 100)}%` }" :class="`strength-${passwordStrength.score}`"></span></div><div class="strength-label"><span>强度：{{ passwordStrength.label }}</span><span>{{ passwordStrength.score }}/6</span></div><div class="security-note"><ShieldCheck :size="15" /> 不会记录输入内容，也不会上传到云端。</div></div>
+              <div class="tool-entry-grid module-tool-grid" role="tablist" aria-label="安全隐私工具">
+                <ToolEntryCard
+                  v-for="id in securityToolIds"
+                  :key="id"
+                  role="tab"
+                  :aria-selected="activeTool === id"
+                  :active="activeTool === id"
+                  :label="toolRegistry.get(id)?.label || id"
+                  :description="toolRegistry.get(id)?.description || ''"
+                  :icon="toolRegistry.get(id)?.icon || ShieldCheck"
+                  :status="toolAccess(id).label"
+                  :status-class="toolAccess(id).className"
+                  @click="rememberRecentTool(id)"
+                />
               </div>
+              <div class="tool-title-row"><div><h2>{{ toolRegistry.get(activeTool)?.label || '安全隐私' }}</h2><p>{{ toolRegistry.get(activeTool)?.description || '口令与敏感内容只在本机内存中处理。' }}</p></div><span class="offline-chip"><ShieldCheck :size="13" /> 本地处理</span></div>
 
-              <div class="security-divider"></div>
-              <div class="crypto-section"><div class="subheading"><LockKeyhole :size="16" /><h3>OpenPGP 文件加密 / 解密</h3></div><div class="segmented-control" aria-label="加密或解密模式"><button type="button" :class="{ active: cryptoMode === 'encrypt' }" :aria-pressed="cryptoMode === 'encrypt'" :disabled="cryptoBusy" @click="openCryptoMode('encrypt')">加密副本</button><button type="button" :class="{ active: cryptoMode === 'decrypt' }" :aria-pressed="cryptoMode === 'decrypt'" :disabled="cryptoBusy" @click="openCryptoMode('decrypt')">解密文件</button></div><label class="dropzone compact-drop" for="crypto-file"><LockKeyhole :size="20" /><strong>{{ cryptoFile?.name || (cryptoMode === 'encrypt' ? '选择待加密文件' : '选择 .pgp 文件') }}</strong><span>文件只在本机内存中处理</span><input id="crypto-file" type="file" :accept="cryptoMode === 'decrypt' ? '.pgp,application/pgp-encrypted' : ''" @change="chooseCryptoFile" /></label><div class="form-grid"><label>口令（至少 8 位）<input v-model="cryptoPassword" class="form-control" type="password" autocomplete="new-password" /></label><label v-if="cryptoMode === 'encrypt'">确认口令<input v-model="cryptoPasswordConfirm" class="form-control" type="password" autocomplete="new-password" /></label></div><div class="action-row"><button class="primary-button" type="button" :disabled="cryptoBusy" @click="runCrypto"><LockKeyhole :size="15" />{{ cryptoBusy ? '处理中...' : cryptoMode === 'encrypt' ? '生成加密副本' : '开始解密' }}</button><span class="safe-hint"><ShieldCheck :size="14" /> 口令不保存，忘记后无法恢复</span></div><div v-if="cryptoResult" class="result-callout doc-result"><CheckCircle2 :size="16" /><span>{{ cryptoResult.summary }}</span><button class="outline-button" type="button" @click="downloadCryptoResult"><Download :size="15" /> 下载结果</button></div></div>
+              <div v-if="activeTool === 'password'" class="security-section security-section-full"><div class="subheading"><KeyRound :size="16" /><h3>强密码生成</h3></div><div class="form-row"><label for="password-length">长度</label><input id="password-length" v-model="passwordLength" class="form-control short-input" type="number" min="8" max="64" /><span class="field-hint">8-64 位</span></div><div class="option-grid"><label v-for="(enabled, key) in passwordOptions" :key="key" class="check-option"><input v-model="passwordOptions[key]" type="checkbox" /><span>{{ { upper: '大写字母', lower: '小写字母', number: '数字', symbol: '符号' }[key] }}</span></label></div><div class="password-output"><code>{{ generatedPassword || '点击生成，密码不会保存' }}</code><button v-if="generatedPassword" class="icon-button" type="button" aria-label="复制密码" @click="copyText(generatedPassword, '密码已复制，请勿保存到不安全位置')"><Copy :size="16" /></button></div><button class="primary-button" type="button" @click="generatePassword"><KeyRound :size="16" /> 生成密码</button></div>
 
-              <div class="security-divider"></div>
-              <div class="redact-section"><div class="subheading"><ShieldCheck :size="16" /><h3>敏感信息脱敏副本</h3></div><div class="redact-grid"><div><label for="redact-source">原文</label><textarea id="redact-source" v-model="redactText" class="form-control" rows="5"></textarea></div><div><label for="redact-result">预览结果</label><textarea id="redact-result" :value="redactedText" class="form-control" rows="5" readonly placeholder="点击生成脱敏副本"></textarea></div></div><div class="action-row"><button class="outline-button" type="button" @click="redactSensitive"><ShieldCheck :size="16" /> 生成脱敏副本</button><span class="safe-hint">源文件与原文不会被覆盖</span></div></div>
+              <div v-else-if="activeTool === 'password-strength'" class="security-section security-section-full"><div class="subheading"><LockKeyhole :size="16" /><h3>密码强度检测</h3></div><label for="password-check">仅在本机内存中检测</label><input id="password-check" v-model="passwordToCheck" class="form-control" type="password" autocomplete="new-password" placeholder="输入待检测密码" /><div class="strength-meter"><span :style="{ width: `${Math.min(passwordStrength.score / 6 * 100, 100)}%` }" :class="`strength-${passwordStrength.score}`"></span></div><div class="strength-label"><span>强度：{{ passwordStrength.label }}</span><span>{{ passwordStrength.score }}/6</span></div><div class="security-note"><ShieldCheck :size="15" /> 不会记录输入内容，也不会上传到云端。</div></div>
+
+              <div v-else-if="activeTool === 'crypto'" class="crypto-section"><div class="subheading"><LockKeyhole :size="16" /><h3>OpenPGP 文件加密 / 解密</h3></div><div class="segmented-control" aria-label="加密或解密模式"><button type="button" :class="{ active: cryptoMode === 'encrypt' }" :aria-pressed="cryptoMode === 'encrypt'" :disabled="cryptoBusy" @click="openCryptoMode('encrypt')">加密副本</button><button type="button" :class="{ active: cryptoMode === 'decrypt' }" :aria-pressed="cryptoMode === 'decrypt'" :disabled="cryptoBusy" @click="openCryptoMode('decrypt')">解密文件</button></div><label class="dropzone compact-drop" for="crypto-file"><LockKeyhole :size="20" /><strong>{{ cryptoFile?.name || (cryptoMode === 'encrypt' ? '选择待加密文件' : '选择 .pgp 文件') }}</strong><span>文件只在本机内存中处理</span><input id="crypto-file" type="file" :accept="cryptoMode === 'decrypt' ? '.pgp,application/pgp-encrypted' : ''" @change="chooseCryptoFile" /></label><div class="form-grid"><label>口令（至少 8 位）<input v-model="cryptoPassword" class="form-control" type="password" autocomplete="new-password" /></label><label v-if="cryptoMode === 'encrypt'">确认口令<input v-model="cryptoPasswordConfirm" class="form-control" type="password" autocomplete="new-password" /></label></div><div class="action-row"><button class="primary-button" type="button" :disabled="cryptoBusy" @click="runCrypto"><LockKeyhole :size="15" />{{ cryptoBusy ? '处理中...' : cryptoMode === 'encrypt' ? '生成加密副本' : '开始解密' }}</button><span class="safe-hint"><ShieldCheck :size="14" /> 口令不保存，忘记后无法恢复</span></div><div v-if="cryptoResult" class="result-callout doc-result"><CheckCircle2 :size="16" /><span>{{ cryptoResult.summary }}</span><button class="outline-button" type="button" @click="downloadCryptoResult"><Download :size="15" /> 下载结果</button></div></div>
+
+              <div v-else class="redact-section"><div class="subheading"><ShieldCheck :size="16" /><h3>敏感信息脱敏副本</h3></div><div class="redact-grid"><div><label for="redact-source">原文</label><textarea id="redact-source" v-model="redactText" class="form-control" rows="5"></textarea></div><div><label for="redact-result">预览结果</label><textarea id="redact-result" :value="redactedText" class="form-control" rows="5" readonly placeholder="点击生成脱敏副本"></textarea></div></div><div class="action-row"><button class="outline-button" type="button" @click="redactSensitive"><ShieldCheck :size="16" /> 生成脱敏副本</button><span class="safe-hint">源文件与原文不会被覆盖</span></div></div>
             </section>
           </div>
 
@@ -2785,7 +2976,37 @@ const statusLabel = computed(() => {
           </div>
 
           <div v-else-if="activeModule === 'assistant'" class="assistant-page">
-            <AssistantWorkspace @open-tool="useToolById" @notify="showToast">
+            <AssistantWorkspace v-model:active-tab="assistantActiveTab" @open-tool="useToolById" @notify="showToast">
+              <template #translation="{ saveNote }">
+                <section class="content-card assistant-card translation-card" aria-labelledby="translation-assistant-title">
+                  <div class="card-heading">
+                    <div><h2 id="translation-assistant-title">翻译助手</h2><p>保留段落和常见格式，使用已配置的中转站生成译文。</p></div>
+                    <Languages :size="18" aria-hidden="true" />
+                  </div>
+                  <div v-if="!relayConfigured" class="dependency-panel missing"><strong>尚未完成中转站配置</strong><span>请在设置中填写 Base URL、API Key 和模型名；翻译内容不会在未配置时发送。</span></div>
+                  <div class="translation-controls">
+                    <label>源语言<select v-model="translationSourceLanguage" class="form-select"><option v-for="language in TRANSLATION_LANGUAGES" :key="`source-${language.value}`" :value="language.value">{{ language.label }}</option></select></label>
+                    <button class="icon-button translation-swap" type="button" :disabled="!canSwapTranslationLanguages(translationSourceLanguage, translationTargetLanguage) || translationBusy" aria-label="交换源语言和目标语言" title="交换源语言和目标语言" @click="swapTranslationLanguages"><ArrowLeftRight :size="16" /></button>
+                    <label>目标语言<select v-model="translationTargetLanguage" class="form-select"><option v-for="language in TRANSLATION_LANGUAGES.filter((item) => item.value !== 'auto')" :key="`target-${language.value}`" :value="language.value">{{ language.label }}</option></select></label>
+                    <label>翻译风格<select v-model="translationStyle" class="form-select"><option v-for="style in TRANSLATION_STYLES" :key="style.value" :value="style.value">{{ style.label }}</option></select></label>
+                  </div>
+                  <label class="translation-format-option"><input v-model="translationPreserveFormatting" type="checkbox" /> <span>保留换行和基础 Markdown 格式</span></label>
+                  <div class="translation-grid">
+                    <label class="translation-pane"><span>原文</span><textarea v-model="translationText" class="form-control" rows="12" :maxlength="TRANSLATION_MAX_CHARACTERS" placeholder="粘贴需要翻译的文本"></textarea><small>{{ translationText.length.toLocaleString() }} / {{ TRANSLATION_MAX_CHARACTERS.toLocaleString() }} 字符</small></label>
+                    <label class="translation-pane"><span>译文</span><textarea class="form-control" rows="12" :value="translationResult?.content || ''" readonly placeholder="翻译完成后显示结果"></textarea><small>{{ translationResult ? `${translationResult.model || relayConfig.model} · ${translationResult.provider || describeRelayProvider(relayConfig).provider}` : '结果只保留在当前页面' }}</small></label>
+                  </div>
+                  <div class="network-disclosure"><Network :size="16" /><span><strong>{{ relayConfigured ? describeRelayProvider(relayConfig).provider : '未配置中转站' }}</strong><small>发送 API Key、模型名、语言选项和原文内容；可在任务中心取消，或在设置中撤回翻译授权。</small></span></div>
+                  <p v-if="translationStatus" class="relay-status" :class="translationStatus.type" role="status" aria-live="polite">{{ translationStatus.message }}</p>
+                  <div class="action-row translation-actions">
+                    <button class="primary-button" type="button" :disabled="translationBusy" @click="runTranslation"><Languages :size="15" /> {{ translationBusy ? '翻译中...' : '开始翻译' }}</button>
+                    <button class="outline-button" type="button" :disabled="translationBusy || (!translationText && !translationResult)" @click="clearTranslation"><X :size="15" /> 清空</button>
+                    <button v-if="translationResult" class="outline-button" type="button" @click="copyText(translationResult.content, '译文已复制')"><Copy :size="15" /> 复制结果</button>
+                    <button v-if="translationResult" class="outline-button" type="button" @click="saveNote({ title: safeTranslationTitle(translationSourceLanguage, translationTargetLanguage), content: translationResult.content, category: 'memo', color: 'blue' })"><FileText :size="15" /> 保存到便签</button>
+                    <button class="outline-button" type="button" @click="openApiSettings"><Settings :size="15" /> 配置</button>
+                    <span class="safe-hint"><Network :size="14" /> 显式联网</span>
+                  </div>
+                </section>
+              </template>
               <template #ai>
                 <section class="content-card assistant-card relay-card" aria-labelledby="relay-assistant-title">
                   <div class="card-heading"><div><h2 id="relay-assistant-title">中转站 AI 助手</h2><p>兼容 OpenAI Chat Completions；内容只在你点击后发送到已配置中转站。</p></div><Sparkles :size="18" /></div>

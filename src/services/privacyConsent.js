@@ -10,6 +10,7 @@ export const consentScopes = Object.freeze({
   port: '端口检测',
   'relay-test': '中转站连接测试',
   relay: '中转站 AI 内容发送',
+  translation: '翻译助手内容发送',
 })
 
 const disclosureDefaults = Object.freeze({
@@ -60,6 +61,12 @@ const disclosureDefaults = Object.freeze({
     providerKey: '',
     data: 'API Key、模型名、固定系统提示、你输入的文本及生成参数',
     purpose: '调用已配置的 AI 模型处理你主动提交的文本',
+  }),
+  translation: Object.freeze({
+    provider: '已配置中转站',
+    providerKey: '',
+    data: 'API Key、模型名、源语言、目标语言、翻译风格和你输入的文本',
+    purpose: '调用已配置的 AI 模型生成翻译结果',
   }),
 })
 
