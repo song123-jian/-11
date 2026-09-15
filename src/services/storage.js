@@ -10,6 +10,7 @@ export const PERSISTED_STATE_KEYS = Object.freeze([
   'reminders',
   'assistant',
   'print-settings',
+  'ui-prefs',
 ])
 
 const persistedStateKeys = new Set(PERSISTED_STATE_KEYS)

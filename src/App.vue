@@ -11,14 +11,18 @@ import {
   Calculator,
   Check,
   CheckCircle2,
+  ChevronLeft,
+  ChevronRight,
   ClipboardList,
   Clock3,
   Copy,
+  Command,
   Download,
   ExternalLink,
   FileArchive,
   FileImage,
   FileOutput,
+  FileSpreadsheet,
   FileText,
   Gauge,
   Image as ImageIcon,
@@ -28,8 +32,12 @@ import {
   Menu,
   MoreHorizontal,
   Network,
+  PanelLeftClose,
+  PanelLeftOpen,
   PanelRight,
   Pause,
+  Pin,
+  PinOff,
   Play,
   Power,
   Plus,
@@ -51,7 +59,7 @@ import {
 } from 'lucide-vue-next'
 import { loadState, saveState } from './services/storage'
 import { createJob } from './services/jobQueue'
-import { downloadBlob, processImage } from './services/imageTools'
+import { downloadBlob, processImage, processImageToTarget } from './services/imageTools'
 import { readQr, renderQr } from './services/qr'
 import { BARCODE_FORMATS, renderBarcode } from './services/barcodeTools'
 import { mergePdfs, splitPdf } from './services/pdfTools'
@@ -77,10 +85,14 @@ import { applyDeepSeekPreset, callRelayChat, clearRelayApiKey, DEEPSEEK_RELAY_PR
 import { buildCcSwitchProviderLink, ccSwitchProviderJson, parseCcSwitchProviderLink } from './services/ccSwitch.js'
 import { filterSearchTools, normalizeSearchIndex, stepSearchIndex } from './services/searchTools'
 import { normalizeRecentTools, normalizeTheme } from './services/localStateModels'
+import { DEFAULT_UI_PREFS, normalizeDensity, normalizeUiPrefs } from './services/uiPreferences'
+import { createToolRegistry } from './services/toolRegistry'
 import AssistantWorkspace from './components/AssistantWorkspace.vue'
 import ImageWorkspace from './components/ImageWorkspace.vue'
 import ShutdownWorkspace from './components/ShutdownWorkspace.vue'
 import PrintWorkspace from './components/PrintWorkspace.vue'
+import ToolWorkspace from './components/ToolWorkspace.vue'
+import TableWorkspace from './components/TableWorkspace.vue'
 
 const modules = [
   { id: 'home', label: '首页', icon: LayoutGrid, description: '常用工具与最近任务' },
@@ -104,6 +116,7 @@ const tools = [
   { id: 'date', module: 'data', label: '日期 / 年龄', icon: CalendarDays, level: 'P0', description: '计算年龄与日期差' },
   { id: 'percentage', module: 'data', label: '百分比计算', icon: Gauge, level: 'P0', description: '增幅、占比与折扣' },
   { id: 'calculator', module: 'data', label: '计算器', icon: Calculator, level: 'P1', description: '四则运算并显示金额大小写' },
+  { id: 'table-data', module: 'data', label: 'Excel / CSV 工具', icon: FileSpreadsheet, description: '合并、拆分、去重、转置与格式互转' },
   { id: 'password', module: 'security', label: '强密码生成', icon: KeyRound, level: 'P0', description: '本地生成，不保存口令' },
   { id: 'password-strength', module: 'security', label: '密码强度检测', icon: LockKeyhole, level: 'P0', description: '只在本机内存中检测' },
   { id: 'todo', module: 'assistant', label: '待办清单', icon: ClipboardList, level: 'P1', description: '本地保存与快速完成' },
@@ -135,15 +148,26 @@ const tools = [
   { id: 'shutdown', module: 'power', label: '定时关机', icon: Power, description: '倒计时或定点执行关机、重启、休眠' },
 ]
 
+// Built-ins and future plug-ins share one registry contract. A new tool only needs
+// an id, module, label, description and icon to appear in search and the command palette.
+const toolRegistry = createToolRegistry(tools)
 const imageTools = tools.filter((tool) => tool.module === 'image')
 const imageToolIds = ['image-compress', 'screenshot', 'long-screenshot', 'watermark', 'stitch', 'image-ai', 'id-photo', 'image-text-edit']
 const advancedImageToolIds = new Set(['image-ai', 'id-photo', 'image-text-edit'])
 
-const activeModule = ref('home')
+const initialUiPrefs = normalizeUiPrefs(loadState('ui-prefs', DEFAULT_UI_PREFS), toolRegistry.ids())
+const initialToolDefinition = toolRegistry.get(initialUiPrefs.lastTool)
+const activeModule = ref(initialToolDefinition?.module || 'home')
 const searchText = ref('')
 const searchFocused = ref(false)
 const searchActiveIndex = ref(-1)
 const taskPanelOpen = ref(false)
+const taskPanelPinned = ref(initialUiPrefs.taskPanelPinned)
+const sidebarCollapsed = ref(initialUiPrefs.sidebarCollapsed)
+const uiDensity = ref(normalizeDensity(initialUiPrefs.density))
+const commandPaletteOpen = ref(false)
+const commandQuery = ref('')
+const commandActiveIndex = ref(0)
 const taskHistoryClearOpen = ref(false)
 const onlineConsentRequest = ref(null)
 const pendingTaskHistoryIds = ref([])
@@ -164,8 +188,9 @@ let taskHistoryClearReturnFocus = null
 let taskHistoryUndoTimer
 let onlineConsentReturnFocus = null
 let onlineConsentResolver = null
-const recentTools = ref(normalizeRecentTools(loadState('recent-tools', defaultRecentTools), tools.map((tool) => tool.id), defaultRecentTools))
-const activeTool = ref('pdf-merge')
+let commandPaletteReturnFocus = null
+const recentTools = ref(normalizeRecentTools(loadState('recent-tools', defaultRecentTools), toolRegistry.ids(), defaultRecentTools))
+const activeTool = ref(initialToolDefinition?.id || 'pdf-merge')
 const runtimeMode = ref(isTauriRuntime ? 'tauri' : 'browser')
 const desktopCapabilities = ref({ platform: isTauriRuntime ? 'desktop' : 'browser', libreoffice: null })
 const networkOnline = ref(typeof navigator === 'undefined' ? null : navigator.onLine)
@@ -204,6 +229,7 @@ const toolSearchAliases = {
   date: ['年龄', '生日', '日期差'],
   percentage: ['增幅', '折扣', '占比'],
   calculator: ['金额大小写', '大小写金额', '四则运算', '算式'],
+  'table-data': ['Excel', 'CSV', 'XLSX', 'JSON', '多表合并', '按列拆分', '去重', '转置', '对账单', '客户表'],
   password: ['口令', '随机密码', '密码生成器'],
   'password-strength': ['口令强度', '密码检测'],
   todo: ['任务', '事项', '清单'],
@@ -236,7 +262,48 @@ const toolSearchAliases = {
 }
 
 const searchResults = computed(() => {
-  return filterSearchTools(tools, searchText.value, recentTools.value, toolSearchAliases)
+  return filterSearchTools(toolRegistry.list(), searchText.value, recentTools.value, toolSearchAliases)
+})
+// 快速开始：最近使用的工具排在前面，不足 8 个时用其余工具按注册表顺序补足。
+const quickTools = computed(() => {
+  const ordered = []
+  const seen = new Set()
+  for (const id of recentTools.value) {
+    const recent = tools.find((item) => item.id === id)
+    if (recent && !seen.has(recent.id)) {
+      seen.add(recent.id)
+      ordered.push(recent)
+    }
+  }
+  for (const tool of tools) {
+    if (ordered.length >= 8) break
+    if (!seen.has(tool.id)) {
+      seen.add(tool.id)
+      ordered.push(tool)
+    }
+  }
+  return ordered.slice(0, 8)
+})
+const commandDefinitions = computed(() => [
+  { id: 'toggle-sidebar', label: sidebarCollapsed.value ? '展开侧栏' : '折叠侧栏', description: '在 234px 导航与 64px 图标轨之间切换', icon: sidebarCollapsed.value ? PanelLeftOpen : PanelLeftClose, keywords: ['sidebar', '导航', '图标轨'] },
+  { id: 'toggle-task-panel', label: taskPanelPinned.value ? '取消固定任务中心' : '固定任务中心', description: '将任务中心作为右侧第三栏显示', icon: taskPanelPinned.value ? PinOff : Pin, keywords: ['任务', '第三栏', 'pin'] },
+  { id: 'open-task-panel', label: taskPanelOpen.value ? '关闭任务中心' : '打开任务中心', description: '查看运行中与最近完成的任务', icon: PanelRight, keywords: ['任务', '工作流'] },
+  { id: 'toggle-density', label: uiDensity.value === 'compact' ? '切换为舒适密度' : '切换为紧凑密度', description: '调整工作区信息密度并记住选择', icon: MoreHorizontal, keywords: ['密度', 'density'] },
+  { id: 'open-settings', label: '打开设置', description: '管理 API、依赖、联网授权与隐私诊断', icon: Settings, keywords: ['设置', '偏好'] },
+  ...toolRegistry.list().map((tool) => ({
+    id: `tool:${tool.id}`,
+    toolId: tool.id,
+    label: `打开 ${tool.label}`,
+    description: tool.description,
+    icon: tool.icon || FileText,
+    keywords: [tool.id, tool.label, tool.description, ...(toolSearchAliases[tool.id] || []), ...(tool.aliases || [])],
+  })),
+])
+const commandResults = computed(() => {
+  const query = commandQuery.value.trim().toLocaleLowerCase()
+  const list = commandDefinitions.value
+  if (!query) return list
+  return list.filter((command) => [command.label, command.description, ...(command.keywords || [])].join(' ').toLocaleLowerCase().includes(query))
 })
 const currentModule = computed(() => modules.find((item) => item.id === activeModule.value) || modules[0])
 const isAdvancedImageTool = computed(() => advancedImageToolIds.has(activeTool.value))
@@ -250,6 +317,47 @@ const dependencyStatus = computed(() => buildDependencyStatus({
   capabilities: desktopCapabilities.value,
   online: networkOnline.value,
 }))
+const boundaryBarDismissed = ref(false)
+const boundaryBar = computed(() => {
+  if (activeModule.value === 'docs' && activeTool.value === 'office-pdf') {
+    const missing = desktopCapabilities.value.libreoffice === false || runtimeMode.value !== 'tauri'
+    return {
+      title: missing ? 'Office 导出依赖未就绪' : 'Office 导出边界',
+      detail: missing ? '需要桌面版与 LibreOffice；其他文档工具仍可继续使用。' : '由桌面桥接调用本机 LibreOffice，不上传文档内容。',
+      attention: missing,
+      icon: FileOutput,
+    }
+  }
+  if (activeModule.value === 'docs' && activeTool.value === 'ocr') {
+    return { title: 'OCR 依赖与边界', detail: '首次识别会按需下载语言模型；图片仍只在本机处理。', attention: networkOnline.value === false, icon: FileImage }
+  }
+  if (activeModule.value === 'docs') {
+    return { title: '文档处理边界', detail: 'PDF、ZIP、模板和 OCR 均在本机处理；OCR 首次只下载模型，不发送图片内容。', attention: false, icon: ShieldCheck }
+  }
+  if (activeModule.value === 'data') {
+    const isExchange = activeTool.value === 'exchange'
+    return {
+      title: isExchange ? '汇率联网边界' : '计算规则与数据边界',
+      detail: isExchange ? '点击后才向 Frankfurter 获取 ECB 参考汇率，并显示服务数据日期。' : '个税、BMI 和贷款结果仅供办公测算，不替代机构意见；固定换算系数在本机计算。',
+      attention: isExchange && networkOnline.value === false,
+      icon: isExchange ? Network : Calculator,
+    }
+  }
+  if (activeModule.value === 'power') {
+    return { title: '系统动作边界', detail: runtimeMode.value === 'tauri' ? '仅桌面桥接执行固定动作；创建前需确认完整参数，默认保留保存缓冲且可在触发前取消。' : '当前为浏览器预览，系统关机、重启和休眠需要桌面版。', attention: runtimeMode.value !== 'tauri', icon: Power }
+  }
+  if (activeModule.value === 'network' || onlineToolIds.has(activeTool.value) || activeTool.value === 'relay-assistant') {
+    return { title: '联网权限边界', detail: '外部请求只在你点击并确认授权后执行；Ping 和端口检测由 Rust 白名单命令处理，不拼接 shell 字符串。', attention: networkOnline.value === false, icon: Network }
+  }
+  if (activeModule.value === 'image') {
+    return { title: '图片处理边界', detail: '基础处理、AI 增强和文字编辑均生成新副本，原图不会被覆盖；超大图片会按尺寸保护处理。AI 视觉算法默认在本机 Canvas 内完成。', attention: false, icon: ImageIcon }
+  }
+  if (activeModule.value === 'security') {
+    return { title: '安全边界', detail: '口令、OpenPGP 和脱敏结果只在本机内存中处理；OpenPGP 使用兼容格式，口令不会保存。', attention: false, icon: LockKeyhole }
+  }
+  return { title: '本地处理边界', detail: '当前工具默认在本机处理，结果另存且不会覆盖源文件。', attention: false, icon: ShieldCheck }
+})
+const boundaryBarVisible = computed(() => !boundaryBarDismissed.value && activeModule.value !== 'home' && activeModule.value !== 'assistant')
 const relayConfigured = computed(() => Boolean(relayConfig.value.baseUrl && relayConfig.value.model && relayConfig.value.apiKey))
 const relayKeySummary = computed(() => maskRelayApiKey(relayConfig.value.apiKey))
 const deepSeekPresetActive = computed(() => isDeepSeekPreset(relayConfig.value))
@@ -695,9 +803,110 @@ function showToast(message, type = 'success') {
   }, 3200)
 }
 
+function persistUiPrefs() {
+  saveState('ui-prefs', {
+    sidebarCollapsed: sidebarCollapsed.value,
+    density: uiDensity.value,
+    lastTool: activeTool.value,
+    taskPanelPinned: taskPanelPinned.value,
+  })
+}
+
+function toggleSidebar() {
+  sidebarCollapsed.value = !sidebarCollapsed.value
+  persistUiPrefs()
+  announce(sidebarCollapsed.value ? '侧栏已折叠为 64 像素图标轨' : '侧栏已展开为 234 像素导航')
+}
+
+function toggleTaskPanelPin() {
+  taskPanelPinned.value = !taskPanelPinned.value
+  taskPanelOpen.value = true
+  persistUiPrefs()
+  showToast(taskPanelPinned.value ? '任务中心已固定为第三栏' : '任务中心已取消固定', 'info')
+}
+
+function scrollTabs(id, direction) {
+  const row = document.getElementById(id)
+  if (!row) return
+  row.scrollBy({ left: direction * Math.max(180, Math.round(row.clientWidth * 0.72)), behavior: 'smooth' })
+}
+
+function openCommandPalette() {
+  commandPaletteReturnFocus = document.activeElement
+  commandPaletteOpen.value = true
+  commandQuery.value = ''
+  commandActiveIndex.value = 0
+  void nextTick(() => document.querySelector('#command-palette-input')?.focus({ preventScroll: true }))
+}
+
+function closeCommandPalette() {
+  commandPaletteOpen.value = false
+  commandQuery.value = ''
+  commandActiveIndex.value = 0
+  const target = commandPaletteReturnFocus
+  commandPaletteReturnFocus = null
+  void nextTick(() => {
+    if (target?.isConnected && typeof target.focus === 'function') target.focus({ preventScroll: true })
+  })
+}
+
+function runCommand(command) {
+  if (!command) return
+  if (command.toolId) {
+    useToolById(command.toolId)
+  } else if (command.id === 'toggle-sidebar') {
+    toggleSidebar()
+  } else if (command.id === 'toggle-task-panel') {
+    toggleTaskPanelPin()
+  } else if (command.id === 'open-task-panel') {
+    taskPanelOpen.value = !taskPanelOpen.value
+  } else if (command.id === 'toggle-density') {
+    uiDensity.value = uiDensity.value === 'compact' ? 'comfortable' : 'compact'
+    persistUiPrefs()
+    showToast(uiDensity.value === 'compact' ? '已切换为紧凑密度' : '已切换为舒适密度', 'info')
+  } else if (command.id === 'open-settings') {
+    openApiSettings()
+  }
+  closeCommandPalette()
+}
+
+function handleCommandPaletteKeydown(event) {
+  const count = commandResults.value.length
+  if (event.key === 'Escape') {
+    event.preventDefault()
+    closeCommandPalette()
+    return
+  }
+  if (event.key === 'ArrowDown') {
+    event.preventDefault()
+    commandActiveIndex.value = count ? (commandActiveIndex.value + 1) % count : 0
+    return
+  }
+  if (event.key === 'ArrowUp') {
+    event.preventDefault()
+    commandActiveIndex.value = count ? (commandActiveIndex.value - 1 + count) % count : 0
+    return
+  }
+  if (event.key === 'Home' && count) {
+    event.preventDefault()
+    commandActiveIndex.value = 0
+    return
+  }
+  if (event.key === 'End' && count) {
+    event.preventDefault()
+    commandActiveIndex.value = count - 1
+    return
+  }
+  if (event.key === 'Enter' && count) {
+    event.preventDefault()
+    runCommand(commandResults.value[commandActiveIndex.value])
+  }
+}
+
 function selectModule(id) {
   activeModule.value = id
   mobileNavOpen.value = false
+  boundaryBarDismissed.value = false
   if (id !== 'home') {
     const first = tools.find((tool) => tool.module === id)
     if (first) activeTool.value = first.id
@@ -711,11 +920,23 @@ function selectTool(tool) {
   }
   activeModule.value = tool.module
   activeTool.value = tool.id
+  boundaryBarDismissed.value = false
   if (tool.module === 'docs') openDocMode(tool.id)
   searchFocused.value = false
   searchActiveIndex.value = -1
   mobileNavOpen.value = false
   recentTools.value = [tool.id, ...recentTools.value.filter((id) => id !== tool.id)].slice(0, 6)
+  saveState('recent-tools', recentTools.value)
+  persistUiPrefs()
+}
+
+// 模块内通过工具 Tab 切换时同样记录最近使用，但不触发模块跳转与忙碌拦截，
+// 这样首页“快速开始 / 最近使用”在任意入口进入工具后都保持一致。
+function rememberRecentTool(id) {
+  if (!id) return
+  activeTool.value = id
+  if (recentTools.value[0] === id) return
+  recentTools.value = [id, ...recentTools.value.filter((item) => item !== id)].slice(0, 6)
   saveState('recent-tools', recentTools.value)
 }
 
@@ -1001,7 +1222,7 @@ async function exportDiagnostics() {
 }
 
 function useToolById(id) {
-  const tool = tools.find((item) => item.id === id)
+  const tool = toolRegistry.get(id) || tools.find((item) => item.id === id)
   if (tool) selectTool(tool)
 }
 
@@ -1013,12 +1234,19 @@ function handleGlobalKeydown(event) {
     }
     return
   }
+  if ((event.ctrlKey || event.metaKey) && event.shiftKey && event.key.toLowerCase() === 'p') {
+    event.preventDefault()
+    if (commandPaletteOpen.value) closeCommandPalette()
+    else openCommandPalette()
+    return
+  }
   if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'k') {
     event.preventDefault()
     document.querySelector('#global-search')?.focus()
   }
   if (event.key === 'Escape') {
     searchFocused.value = false
+    if (commandPaletteOpen.value) closeCommandPalette()
     closeSettings()
   }
 }
@@ -1055,12 +1283,19 @@ watch(searchText, () => {
   searchActiveIndex.value = normalizeSearchIndex(-1, searchResults.value.length)
 })
 
+watch(commandQuery, () => {
+  commandActiveIndex.value = 0
+})
+
+watch([sidebarCollapsed, uiDensity, taskPanelPinned, activeTool], persistUiPrefs)
+
 onMounted(() => {
   document.documentElement.dataset.theme = theme.value
   persistTasks()
   saveState('theme', theme.value)
   saveState('recent-tools', recentTools.value)
   saveState('online-consent', onlineConsent.value)
+  persistUiPrefs()
   window.addEventListener('keydown', handleGlobalKeydown)
   window.addEventListener('online', updateNetworkOnlineStatus)
   window.addEventListener('offline', updateNetworkOnlineStatus)
@@ -1086,6 +1321,7 @@ onBeforeUnmount(() => {
   if (imageBatchPreview.value) URL.revokeObjectURL(imageBatchPreview.value)
   if (barcodePreview.value) URL.revokeObjectURL(barcodePreview.value)
   if (taskHistoryUndoTimer) window.clearTimeout(taskHistoryUndoTimer)
+  commandPaletteReturnFocus = null
 })
 
 // Document tools
@@ -1166,7 +1402,7 @@ function openDocMode(mode) {
     docSelectionFeedback.value = ''
   }
   docMode.value = mode
-  activeTool.value = mode
+  rememberRecentTool(mode)
   docResult.value = null
 }
 
@@ -1872,6 +2108,8 @@ const imageFile = ref(null)
 const imagePreview = ref('')
 const imageQuality = ref(82)
 const imageFormat = ref('image/jpeg')
+const imageTargetEnabled = ref(false)
+const imageTargetKb = ref(300)
 const imageResult = ref(null)
 const imageBusy = ref(false)
 const imageBatchFiles = ref([])
@@ -1879,6 +2117,7 @@ const imageBatchBusy = ref(false)
 const imageBatchResult = ref(null)
 const imageBatchPreview = ref('')
 const imageWorkspaceBusy = ref(false)
+const tableWorkspaceBusy = ref(false)
 const watermarkText = ref('仅供内部使用')
 const watermarkOpacity = ref(40)
 const stitchDirection = ref('vertical')
@@ -1903,7 +2142,9 @@ async function compressImage() {
   }
   imageBusy.value = true
   try {
-    imageResult.value = await processImage(imageFile.value, { quality: imageQuality.value / 100, format: imageFormat.value })
+    imageResult.value = imageTargetEnabled.value
+      ? await processImageToTarget(imageFile.value, { targetKb: imageTargetKb.value, format: imageFormat.value, maxEdge: 2400, minQuality: 0.18 })
+      : await processImage(imageFile.value, { quality: imageQuality.value / 100, format: imageFormat.value })
     showToast('图片处理完成，可下载结果')
   } catch (error) {
     showToast(error.message, 'error')
@@ -1925,7 +2166,7 @@ function openImageMode(mode) {
     showToast('请等待当前图片任务完成，或先在任务中心取消', 'info')
     return
   }
-  activeTool.value = mode
+  rememberRecentTool(mode)
   imageBatchFiles.value = []
   setImageBatchResult(null)
 }
@@ -2212,16 +2453,17 @@ const statusLabel = computed(() => {
 </script>
 
 <template>
-  <div class="app-shell">
+  <div class="app-shell" :class="{ 'sidebar-collapsed': sidebarCollapsed, 'task-panel-pinned': taskPanelPinned && taskPanelOpen, 'density-compact': uiDensity === 'compact' }">
     <a class="skip-link" href="#main-content" @click="focusMainContent">跳到主要内容</a>
     <div class="sr-only" aria-live="polite">{{ announcement }}</div>
-    <aside class="sidebar" :class="{ 'is-open': mobileNavOpen }" :aria-hidden="onlineConsentRequest ? 'true' : undefined" :inert="onlineConsentRequest ? '' : undefined">
+    <aside class="sidebar" :class="{ 'is-open': mobileNavOpen, 'is-collapsed': sidebarCollapsed }" :aria-hidden="onlineConsentRequest ? 'true' : undefined" :inert="onlineConsentRequest ? '' : undefined">
       <div class="brand-lockup">
         <div class="brand-mark" aria-hidden="true"><Zap :size="18" /></div>
-        <div>
+        <div class="brand-copy">
           <strong>效率百宝箱</strong>
           <span>本地优先 · 无广告</span>
         </div>
+        <button class="icon-button sidebar-toggle" type="button" :aria-label="sidebarCollapsed ? '展开侧栏' : '折叠侧栏'" :title="sidebarCollapsed ? '展开侧栏' : '折叠侧栏'" @click="toggleSidebar"><component :is="sidebarCollapsed ? PanelLeftOpen : PanelLeftClose" :size="17" /></button>
         <button class="icon-button mobile-close" type="button" aria-label="关闭导航" @click="mobileNavOpen = false"><X :size="18" /></button>
       </div>
       <nav class="module-nav" aria-label="功能模块">
@@ -2235,13 +2477,13 @@ const statusLabel = computed(() => {
           @click="selectModule(item.id)"
         >
           <component :is="item.icon" :size="17" stroke-width="1.8" aria-hidden="true" />
-          <span>{{ item.label }}</span>
+           <span class="nav-label">{{ item.label }}</span>
         </button>
       </nav>
-      <div class="sidebar-footer">
-        <div class="privacy-status"><span class="status-dot"></span><span>本地模式</span><span class="status-lock"><LockKeyhole :size="13" /></span></div>
-        <button class="settings-link" type="button" @click="openApiSettings"><Settings :size="16" /> 设置</button>
-      </div>
+       <div class="sidebar-footer">
+         <div class="privacy-status" title="本地模式"><span class="status-dot"></span><span class="privacy-label">本地模式</span><span class="status-lock"><LockKeyhole :size="13" /></span></div>
+         <button class="settings-link" type="button" aria-label="打开设置" title="打开设置" @click="openApiSettings"><Settings :size="16" /><span class="nav-label">设置</span></button>
+       </div>
     </aside>
 
     <div class="app-content" :aria-hidden="onlineConsentRequest ? 'true' : undefined" :inert="onlineConsentRequest ? '' : undefined">
@@ -2262,11 +2504,12 @@ const statusLabel = computed(() => {
             <div v-if="!searchResults.length" class="empty-search">没有匹配功能，试试“PDF”“图片”或“密码”。</div>
           </div>
         </div>
-        <div class="topbar-actions">
-          <span class="connection-label"><span class="status-dot" :class="{ offline: networkOnline === false }"></span>{{ statusLabel }}</span>
-          <button class="task-button" :class="{ active: taskPanelOpen }" type="button" aria-label="打开任务中心" @click="taskPanelOpen = !taskPanelOpen">
-            <PanelRight :size="18" /><span>任务中心</span><b v-if="runningTasks.length">{{ runningTasks.length }}</b>
-          </button>
+         <div class="topbar-actions">
+           <span class="connection-label"><span class="status-dot" :class="{ offline: networkOnline === false }"></span>{{ statusLabel }}</span>
+           <button class="command-trigger" type="button" aria-label="打开命令面板" title="命令面板 · Ctrl Shift P" @click="openCommandPalette"><Command :size="16" /><span>命令</span><kbd>Ctrl ⇧ P</kbd></button>
+           <button class="task-button" :class="{ active: taskPanelOpen }" type="button" :aria-label="taskPanelOpen ? '关闭任务中心' : '打开任务中心'" @click="taskPanelOpen = !taskPanelOpen">
+             <PanelRight :size="18" /><span>任务中心</span><b v-if="runningTasks.length">{{ runningTasks.length }}</b>
+           </button>
           <button class="avatar-button" type="button" aria-label="打开设置" @click="openApiSettings">S</button>
         </div>
       </header>
@@ -2282,9 +2525,9 @@ const statusLabel = computed(() => {
             <div class="hero-status"><ShieldCheck :size="18" /><span>隐私边界已启用</span></div>
           </div>
 
-          <div class="section-header"><div><h2>快速开始</h2><p>从首页或全局搜索，两步到达目标功能。</p></div><span class="section-meta">常用工具</span></div>
+          <div class="section-header"><div><h2>快速开始</h2><p>最近使用的工具排在前面，其余按功能顺序补足；也可用 Ctrl+K 全局搜索。</p></div><span class="section-meta">最近优先</span></div>
           <div class="quick-grid">
-            <button v-for="tool in tools.slice(0, 8)" :key="tool.id" class="quick-card" type="button" @click="selectTool(tool)">
+            <button v-for="tool in quickTools" :key="tool.id" class="quick-card" type="button" @click="selectTool(tool)">
               <span class="quick-icon"><component :is="tool.icon" :size="19" /></span>
               <span class="quick-copy"><strong>{{ tool.label }}</strong><small>{{ tool.description }}</small></span>
               <span class="access-tag" :class="toolAccess(tool.id).className">{{ toolAccess(tool.id).label }}</span>
@@ -2335,13 +2578,22 @@ const statusLabel = computed(() => {
             <div class="module-actions"><button class="outline-button" type="button" @click="taskPanelOpen = true"><PanelRight :size="16" /> 任务中心</button></div>
           </div>
 
+          <div v-if="boundaryBarVisible" class="dependency-bar" :class="{ attention: boundaryBar.attention }" role="status">
+            <div class="dependency-bar-copy"><span class="dependency-bar-icon"><component :is="boundaryBar.icon" :size="16" /></span><span><strong>{{ boundaryBar.title }}</strong><small>{{ boundaryBar.detail }}</small></span></div>
+            <button class="icon-button" type="button" aria-label="关闭边界提示" title="关闭边界提示" @click="boundaryBarDismissed = true"><X :size="15" /></button>
+          </div>
+
           <div v-if="activeModule === 'docs'" class="workspace-grid">
-            <section class="content-card tool-card" aria-labelledby="doc-tool-title">
-              <div class="tool-tabs" role="tablist" aria-label="文档工具">
+            <ToolWorkspace aria-labelledby="doc-tool-title">
+              <div class="tab-scroller">
+                <button class="icon-button tab-scroll-button" type="button" aria-label="向左滚动文档工具" title="向左滚动" @click="scrollTabs('docs-tool-tabs', -1)"><ChevronLeft :size="16" /></button>
+                <div id="docs-tool-tabs" class="tool-tabs tab-scroll-row" role="tablist" aria-label="文档工具">
                 <button v-for="mode in ['pdf-merge', 'pdf-split', 'rename', 'archive', 'office-pdf', 'print', 'templates', 'ocr']" :key="mode" class="tool-tab" :class="{ active: docMode === mode }" type="button" role="tab" :disabled="docBusy" :aria-selected="docMode === mode" @click="openDocMode(mode)">
                   <component :is="tools.find((tool) => tool.id === mode)?.icon || FileText" :size="15" />
                   {{ tools.find((tool) => tool.id === mode)?.label }}
                 </button>
+                </div>
+                <button class="icon-button tab-scroll-button" type="button" aria-label="向右滚动文档工具" title="向右滚动" @click="scrollTabs('docs-tool-tabs', 1)"><ChevronRight :size="16" /></button>
               </div>
 
               <div class="tool-title-row">
@@ -2407,18 +2659,18 @@ const statusLabel = computed(() => {
               <div v-if="extractedEntries.length" class="file-list result-list" aria-label="已提取文件"><div v-for="entry in extractedEntries" :key="entry.name" class="file-row"><FileText :size="15" /><span class="file-name">{{ entry.name }}</span><span class="file-size">{{ (entry.size / 1024).toFixed(1) }} KB</span><button class="icon-button" type="button" :aria-label="`下载 ${entry.name}`" @click="downloadExtracted(entry)"><Download :size="15" /></button></div></div>
               <div v-if="ocrResult" class="ocr-result"><div class="result-heading"><span>识别结果 · 置信度 {{ ocrResult.confidence.toFixed(1) }}%</span><div><button class="icon-button" type="button" aria-label="复制 OCR 文本" @click="copyText(ocrResult.text)"><Copy :size="15" /></button><button class="icon-button" type="button" aria-label="下载 OCR 文本" @click="downloadOcrText"><Download :size="15" /></button></div></div><textarea class="form-control" :value="ocrResult.text" rows="10" readonly></textarea></div>
               <div v-if="desktopFileResults.length" class="file-list result-list" aria-label="批量文件处理结果"><div v-for="(item, index) in desktopFileResults" :key="`${item.inputName}-${index}`" class="file-row"><CheckCircle2 v-if="item.success" :size="15" class="success-icon" /><X v-else :size="15" class="negative" /><span class="file-name">{{ item.inputName }}</span><span v-if="item.success && item.outputName" class="file-output-name" :title="item.outputName">{{ item.outputName }}</span><span class="file-path" :title="item.success ? item.outputPath : item.error">{{ item.success ? item.outputPath : item.error }}</span></div></div>
-            </section>
-            <aside class="side-rail">
-              <section class="content-card info-card"><div class="card-heading"><h2>处理边界</h2><ShieldCheck :size="17" /></div><p class="side-copy">PDF、ZIP、模板和 OCR 均在本机处理。OCR 首次只下载模型，不发送图片内容。</p></section>
-              <section class="content-card boundary-card"><span class="boundary-icon"><FileOutput :size="17" /></span><h2>桌面依赖</h2><p>Office 导出由 Tauri 调用 LibreOffice；当前状态会在入口处明确显示。</p><span class="dependency-state" :class="desktopCapabilities.libreoffice ? 'ready' : 'attention'">LibreOffice · {{ desktopCapabilities.libreoffice ? '可用' : '未就绪' }}</span></section>
-            </aside>
+            </ToolWorkspace>
           </div>
 
           <div v-else-if="activeModule === 'data'" class="workspace-grid data-workspace">
-            <section class="content-card tool-card">
-              <div class="tool-title-row"><div><h2>数据计算</h2><p>本地规则型结果标注依据；汇率仅在点击后联网并显示数据日期。</p></div><span :class="activeTool === 'exchange' ? 'online-chip' : 'offline-chip'"><Gauge :size="13" /> {{ activeTool === 'exchange' ? '显式联网' : '离线可用' }}</span></div>
-              <div class="calc-tabs" role="tablist" aria-label="计算工具">
-                <button v-for="id in ['unit', 'date', 'percentage', 'calculator', 'exchange', 'mortgage', 'tax', 'bmi']" :key="id" type="button" role="tab" :aria-selected="activeTool === id" :class="{ active: activeTool === id }" @click="activeTool = id">{{ tools.find((tool) => tool.id === id)?.label }}</button>
+            <ToolWorkspace>
+              <div class="tool-title-row"><div><h2>{{ tools.find((tool) => tool.id === activeTool)?.label || '数据计算' }}</h2><p>{{ tools.find((tool) => tool.id === activeTool)?.description || '本地规则型结果标注依据；汇率仅在点击后联网并显示数据日期。' }}</p></div><span :class="activeTool === 'exchange' ? 'online-chip' : 'offline-chip'"><Gauge :size="13" /> {{ activeTool === 'exchange' ? '显式联网' : '离线可用' }}</span></div>
+              <div class="tab-scroller">
+                <button class="icon-button tab-scroll-button" type="button" aria-label="向左滚动计算工具" title="向左滚动" @click="scrollTabs('data-tool-tabs', -1)"><ChevronLeft :size="16" /></button>
+                <div id="data-tool-tabs" class="calc-tabs tab-scroll-row" role="tablist" aria-label="计算工具">
+                <button v-for="id in ['unit', 'date', 'percentage', 'calculator', 'table-data', 'exchange', 'mortgage', 'tax', 'bmi']" :key="id" type="button" role="tab" :aria-selected="activeTool === id" :class="{ active: activeTool === id }" @click="rememberRecentTool(id)">{{ tools.find((tool) => tool.id === id)?.label }}</button>
+                </div>
+                <button class="icon-button tab-scroll-button" type="button" aria-label="向右滚动计算工具" title="向右滚动" @click="scrollTabs('data-tool-tabs', 1)"><ChevronRight :size="16" /></button>
               </div>
 
               <div v-if="activeTool === 'unit'" class="calculator"><div class="form-grid three"><label>类别<select v-model="unitCategory" class="form-control"><option value="length">长度</option><option value="weight">重量</option><option value="temperature">温度</option></select></label><label>数值<input v-model="unitValue" class="form-control" type="number" /></label><label>从<select v-model="fromUnit" class="form-control"><option v-for="item in unitOptions" :key="item.value" :value="item.value">{{ item.label }}</option></select></label><label>到<select v-model="toUnit" class="form-control"><option v-for="item in unitOptions" :key="item.value" :value="item.value">{{ item.label }}</option></select></label></div><div class="result-panel"><span>换算结果</span><strong>{{ Number(unitResult).toLocaleString('zh-CN', { maximumFractionDigits: 8 }) }} {{ unitTables[unitCategory][toUnit][0] }}</strong><small>本地固定换算系数</small></div></div>
@@ -2438,17 +2690,21 @@ const statusLabel = computed(() => {
                 <p v-if="calculatorError" class="calculator-error" role="alert">{{ calculatorError }}</p>
                 <div v-if="calculatorResult" class="result-grid calculator-result-grid"><div class="result-panel compact"><span>小写金额</span><strong>{{ calculatorResult.lowercase }} 元</strong><small>按两位小数显示</small></div><div class="result-panel compact"><span>大写金额</span><strong class="uppercase-amount">{{ calculatorResult.uppercase }}</strong><small>人民币中文金额</small></div></div>
               </div>
+              <TableWorkspace v-else-if="activeTool === 'table-data'" :notify="showToast" @busy-change="tableWorkspaceBusy = $event" />
               <div v-else-if="activeTool === 'exchange'" class="calculator"><div class="form-grid three"><label>金额<input v-model="exchangeAmount" class="form-control" type="number" min="0.01" /></label><label>从<select v-model="exchangeFrom" class="form-control"><option v-for="code in ['CNY','USD','EUR','GBP','JPY']" :key="code" :value="code">{{ code }}</option></select></label><label>到<select v-model="exchangeTo" class="form-control"><option v-for="code in ['USD','CNY','EUR','GBP','JPY']" :key="code" :value="code">{{ code }}</option></select></label></div><div class="network-disclosure"><Network :size="16" /><span><strong>Frankfurter · ECB 参考汇率</strong><small>发送金额和币种以获取带日期的汇率；可在任务中心取消，或在设置中撤回授权。</small></span></div><div class="action-row"><button class="primary-button" type="button" :disabled="exchangeBusy" @click="runExchange"><RefreshCw :size="15" /> {{ exchangeBusy ? '查询中...' : '查询最新汇率' }}</button></div><div v-if="exchangeResult" class="result-panel"><span>换算结果</span><strong>{{ exchangeResult.amount.toLocaleString('zh-CN', { maximumFractionDigits: 4 }) }} {{ exchangeTo }}</strong><small>1 {{ exchangeFrom }} = {{ exchangeResult.rate.toFixed(6) }} {{ exchangeTo }} · {{ exchangeResult.provider }} · 数据日期 {{ exchangeResult.date }}</small></div></div>
               <div v-else-if="activeTool === 'mortgage'" class="calculator"><div class="form-grid three"><label>贷款本金（元）<input v-model="mortgageInput.principal" class="form-control" type="number" min="1" /></label><label>期限（年）<input v-model="mortgageInput.years" class="form-control" type="number" min="1" max="50" /></label><label>年利率（%）<input v-model="mortgageInput.annualRate" class="form-control" type="number" min="0.01" step="0.01" /></label><label>还款方式<select v-model="mortgageInput.method" class="form-control"><option value="equal-payment">等额本息</option><option value="equal-principal">等额本金</option></select></label></div><div class="action-row"><button class="primary-button" type="button" @click="runMortgage"><Gauge :size="15" /> 计算房贷</button></div><div v-if="mortgageResult" class="result-grid"><div class="result-panel compact"><span>{{ mortgageInput.method === 'equal-payment' ? '月供' : '首月月供' }}</span><strong>¥{{ mortgageResult.firstPayment.toFixed(2) }}</strong><small v-if="mortgageInput.method === 'equal-principal'">末月 ¥{{ mortgageResult.lastPayment.toFixed(2) }}</small></div><div class="result-panel compact"><span>总利息 / 总还款</span><strong>¥{{ mortgageResult.totalInterest.toFixed(2) }}</strong><small>总还款 ¥{{ mortgageResult.totalPayment.toFixed(2) }} · {{ mortgageResult.months }} 期</small></div></div></div>
               <div v-else-if="activeTool === 'tax'" class="calculator"><div class="form-grid"><label>年度综合所得（元）<input v-model="taxInput.annualIncome" class="form-control" type="number" min="0" /></label><label>年度专项等扣除（元）<input v-model="taxInput.annualDeduction" class="form-control" type="number" min="0" /></label></div><div class="action-row"><button class="primary-button" type="button" @click="runTax"><Gauge :size="15" /> 估算个税</button></div><div v-if="taxResult" class="result-panel"><span>年度估算税额</span><strong>¥{{ taxResult.tax.toFixed(2) }}</strong><small>应纳税所得额 ¥{{ taxResult.taxable.toFixed(2) }} · 税率 {{ (taxResult.rate * 100).toFixed(0) }}% · {{ taxResult.rule }}</small></div></div>
               <div v-else class="calculator"><div class="form-grid"><label>体重（kg）<input v-model="bmiInput.weight" class="form-control" type="number" min="1" step="0.1" /></label><label>身高（cm）<input v-model="bmiInput.height" class="form-control" type="number" min="1" step="0.1" /></label></div><div class="action-row"><button class="primary-button" type="button" @click="runBmi"><Gauge :size="15" /> 计算 BMI</button></div><div v-if="bmiResult" class="result-panel"><span>BMI / 分类</span><strong>{{ bmiResult.bmi.toFixed(2) }} · {{ bmiResult.category }}</strong><small>{{ bmiResult.rule }}</small></div></div>
-            </section>
-            <aside class="side-rail"><section class="content-card rules-card"><div class="card-heading"><h2>规则与来源</h2><Bell :size="17" /></div><div class="rule-line"><span>汇率</span><span class="online-chip">需联网</span></div><p>Frankfurter 提供 ECB 参考汇率，结果显示服务数据日期。</p><div class="rule-line"><span>个税 / BMI</span><span class="field-hint">规则版本</span></div><p>计算结果仅供办公测算，不替代税务、医疗或贷款机构意见。</p></section></aside>
+            </ToolWorkspace>
           </div>
 
           <div v-else-if="activeModule === 'network'" class="workspace-grid">
-            <section class="content-card tool-card">
-              <div class="tool-tabs" role="tablist" aria-label="网络工具"><button v-for="id in ['qr', 'barcode', 'speed', 'ip', 'ping', 'port']" :key="id" class="tool-tab" :class="{ active: activeTool === id }" type="button" role="tab" :aria-selected="activeTool === id" :disabled="networkBusy || barcodeBusy" @click="activeTool = id"><component :is="tools.find((tool) => tool.id === id)?.icon || Network" :size="15" />{{ tools.find((tool) => tool.id === id)?.label }}</button></div>
+            <ToolWorkspace>
+              <div class="tab-scroller">
+                <button class="icon-button tab-scroll-button" type="button" aria-label="向左滚动网络工具" title="向左滚动" @click="scrollTabs('network-tool-tabs', -1)"><ChevronLeft :size="16" /></button>
+                <div id="network-tool-tabs" class="tool-tabs tab-scroll-row" role="tablist" aria-label="网络工具"><button v-for="id in ['qr', 'barcode', 'speed', 'ip', 'ping', 'port']" :key="id" class="tool-tab" :class="{ active: activeTool === id }" type="button" role="tab" :aria-selected="activeTool === id" :disabled="networkBusy || barcodeBusy" @click="rememberRecentTool(id)"><component :is="tools.find((tool) => tool.id === id)?.icon || Network" :size="15" />{{ tools.find((tool) => tool.id === id)?.label }}</button></div>
+                <button class="icon-button tab-scroll-button" type="button" aria-label="向右滚动网络工具" title="向右滚动" @click="scrollTabs('network-tool-tabs', 1)"><ChevronRight :size="16" /></button>
+              </div>
 
               <template v-if="activeTool === 'qr'">
                 <div class="tool-title-row"><div><h2>二维码工具</h2><p>生成与识别均在本机完成，图片不会上传。</p></div><span class="offline-chip"><LockKeyhole :size="13" /> 本地处理</span></div>
@@ -2477,19 +2733,22 @@ const statusLabel = computed(() => {
                 <div class="action-row"><button class="primary-button" type="button" :disabled="networkBusy || ((activeTool === 'ping' || activeTool === 'port') && runtimeMode !== 'tauri')" @click="runNetworkAction(activeTool)"><Play :size="15" /> {{ networkBusy ? '检测中...' : '开始检测' }}</button></div>
                 <div v-if="networkResult" class="result-panel"><span>检测结果</span><strong v-if="networkResult.type === 'speed'">{{ networkResult.mbps.toFixed(2) }} Mbps</strong><strong v-else-if="networkResult.type === 'ip'">{{ networkResult.value }}</strong><strong v-else :class="networkResult.success ? 'positive' : 'negative'">{{ networkResult.detail }}</strong><small v-if="networkResult.type === 'speed'">接收 {{ (networkResult.bytes / 1000000).toFixed(2) }} MB · {{ networkResult.seconds.toFixed(2) }} 秒 · {{ networkResult.provider }}</small><small v-else-if="networkResult.type === 'ip'">{{ networkResult.provider }} · {{ networkResult.checkedAt }}</small><small v-else>耗时 {{ networkResult.elapsedMs }} ms · 用户指定目标</small></div>
               </template>
-            </section>
-            <aside class="side-rail"><section class="content-card boundary-card"><span class="boundary-icon"><Network :size="17" /></span><h2>权限边界</h2><p>外部请求只在点击后执行；Ping 和端口检测由 Rust 白名单命令处理，不拼接 shell 字符串。</p><span :class="runtimeMode === 'tauri' ? 'offline-chip' : 'online-chip'"><Square :size="11" /> {{ runtimeMode === 'tauri' ? '桌面桥接已连接' : '浏览器模式' }}</span></section></aside>
+            </ToolWorkspace>
           </div>
 
           <div v-else-if="activeModule === 'image'" class="workspace-grid">
-            <section class="content-card tool-card">
-              <div class="tool-tabs image-tool-tabs" role="tablist" aria-label="图片工具"><button v-for="id in imageToolIds" :key="id" class="tool-tab" :class="{ active: activeTool === id }" type="button" role="tab" :aria-selected="activeTool === id" :disabled="imageBusy || imageBatchBusy || imageWorkspaceBusy" @click="openImageMode(id)"><component :is="tools.find((tool) => tool.id === id)?.icon || ImageIcon" :size="15" />{{ tools.find((tool) => tool.id === id)?.label }}</button></div>
+            <ToolWorkspace>
+              <div class="tab-scroller">
+                <button class="icon-button tab-scroll-button" type="button" aria-label="向左滚动图片工具" title="向左滚动" @click="scrollTabs('image-tool-tabs', -1)"><ChevronLeft :size="16" /></button>
+                <div id="image-tool-tabs" class="tool-tabs image-tool-tabs tab-scroll-row" role="tablist" aria-label="图片工具"><button v-for="id in imageToolIds" :key="id" class="tool-tab" :class="{ active: activeTool === id }" type="button" role="tab" :aria-selected="activeTool === id" :disabled="imageBusy || imageBatchBusy || imageWorkspaceBusy" @click="openImageMode(id)"><component :is="tools.find((tool) => tool.id === id)?.icon || ImageIcon" :size="15" />{{ tools.find((tool) => tool.id === id)?.label }}</button></div>
+                <button class="icon-button tab-scroll-button" type="button" aria-label="向右滚动图片工具" title="向右滚动" @click="scrollTabs('image-tool-tabs', 1)"><ChevronRight :size="16" /></button>
+              </div>
 
               <ImageWorkspace v-if="isAdvancedImageTool" :mode="activeTool" :runtime-mode="runtimeMode" :start-task="startTask" :run-online-action="runAuthorizedOnlineAction" @busy-change="imageWorkspaceBusy = $event" @notify="showToast" />
 
               <template v-else-if="activeTool === 'image-compress'">
                 <div class="tool-title-row"><div><h2>图片压缩与格式转换</h2><p>Canvas 本地处理；原图不上传，结果另存为新文件。</p></div><span class="offline-chip"><LockKeyhole :size="13" /> 本地处理</span></div>
-                <label class="dropzone image-drop" for="image-file"><ImageIcon :size="22" /><strong>{{ imageFile ? imageFile.name : '选择一张图片' }}</strong><span>支持 JPG、PNG、WebP · 处理前预览</span><input id="image-file" type="file" accept="image/*" @change="chooseImage" /></label><div v-if="imagePreview" class="image-workbench"><div class="image-preview"><img :src="imagePreview" alt="待处理图片预览" /></div><div class="image-controls"><label>质量 <strong>{{ imageQuality }}%</strong><input v-model="imageQuality" class="form-range" type="range" min="20" max="100" /></label><label>输出格式<select v-model="imageFormat" class="form-control"><option value="image/jpeg">JPG</option><option value="image/png">PNG</option><option value="image/webp">WebP</option></select></label><button class="primary-button" type="button" :disabled="imageBusy" @click="compressImage"><WandSparkles :size="16" /> {{ imageBusy ? '处理中...' : '开始处理' }}</button><button v-if="imageResult" class="outline-button" type="button" @click="downloadImage"><Download :size="16" /> 下载 {{ imageResult.width }}×{{ imageResult.height }}</button><div v-if="imageResult" class="result-callout"><CheckCircle2 :size="16" /><span>{{ (imageResult.blob.size / 1024).toFixed(0) }} KB · 已生成结果</span></div></div></div>
+                <label class="dropzone image-drop" for="image-file"><ImageIcon :size="22" /><strong>{{ imageFile ? imageFile.name : '选择一张图片' }}</strong><span>支持 JPG、PNG、WebP · 处理前预览</span><input id="image-file" type="file" accept="image/*" @change="chooseImage" /></label><div v-if="imagePreview" class="image-workbench"><div class="image-preview"><img :src="imagePreview" alt="待处理图片预览" /></div><div class="image-controls"><label class="check-option image-target-toggle"><input v-model="imageTargetEnabled" type="checkbox" /> 压到指定 KB</label><label v-if="imageTargetEnabled">目标大小（KB）<input v-model="imageTargetKb" class="form-control" type="number" min="10" max="20000" step="1" /><span class="field-hint">系统会自动调整质量与尺寸，尽量不超过目标。</span></label><label v-else>质量 <strong>{{ imageQuality }}%</strong><input v-model="imageQuality" class="form-range" type="range" min="20" max="100" /></label><label>输出格式<select v-model="imageFormat" class="form-control"><option value="image/jpeg">JPG</option><option value="image/png">PNG</option><option value="image/webp">WebP</option></select></label><button class="primary-button" type="button" :disabled="imageBusy" @click="compressImage"><WandSparkles :size="16" /> {{ imageBusy ? '处理中...' : imageTargetEnabled ? '压缩到目标大小' : '开始处理' }}</button><button v-if="imageResult" class="outline-button" type="button" @click="downloadImage"><Download :size="16" /> 下载 {{ imageResult.width }}×{{ imageResult.height }}</button><div v-if="imageResult" class="result-callout"><CheckCircle2 :size="16" /><span>{{ (imageResult.blob.size / 1024).toFixed(0) }} KB · {{ imageResult.withinTarget === false ? `未达到 ${imageResult.targetKb} KB，已尽量压缩` : imageResult.targetKb ? `目标 ${imageResult.targetKb} KB 内` : '已生成结果' }}</span></div></div></div>
               </template>
 
               <template v-else>
@@ -2502,13 +2761,12 @@ const statusLabel = computed(() => {
                 <div v-if="imageBatchPreview" class="image-preview result-preview"><img :src="imageBatchPreview" alt="图片处理结果预览" /></div>
                 <div v-if="imageBatchResult" class="result-callout doc-result"><CheckCircle2 :size="16" /><span>{{ imageBatchResult.summary }}</span><button class="outline-button" type="button" @click="downloadImageBatchResult"><Download :size="15" /> 下载{{ imageBatchResult.filename.endsWith('.zip') ? ' ZIP' : '图片' }}</button></div>
               </template>
-            </section>
-            <aside class="side-rail"><section class="content-card info-card"><div class="card-heading"><h2>图片处理边界</h2><ImageIcon :size="17" /></div><p class="side-copy">基础处理、AI 增强和文字编辑均生成新副本；原图不会被覆盖。超大图片会按尺寸保护处理，避免页面失去响应。</p></section><section class="content-card boundary-card"><span class="boundary-icon"><Sparkles :size="17" /></span><h2>本地视觉工具</h2><p>AI 增强与抠图默认使用本机 Canvas 算法，不上传图片；证件照规格为常用参考，最终以办证机构要求为准。</p><span class="offline-chip"><LockKeyhole :size="13" /> 本地优先</span></section></aside>
+            </ToolWorkspace>
           </div>
 
           <div v-else-if="activeModule === 'security'" class="workspace-grid">
             <section class="content-card tool-card">
-              <div class="tool-title-row"><div><h2>安全隐私</h2><p>口令与敏感内容只在本机内存中处理，不写入任务历史或本地设置。</p></div><span class="offline-chip"><ShieldCheck :size="13" /> 默认本地</span></div>
+              <div class="tool-title-row"><div><h2>密码 · OpenPGP · 敏感脱敏</h2><p>口令与敏感内容只在本机内存中处理，不写入任务历史或本地设置。</p></div><span class="offline-chip"><ShieldCheck :size="13" /> 默认本地</span></div>
               <div class="security-grid">
                 <div class="security-section"><div class="subheading"><KeyRound :size="16" /><h3>强密码生成</h3></div><div class="form-row"><label for="password-length">长度</label><input id="password-length" v-model="passwordLength" class="form-control short-input" type="number" min="8" max="64" /><span class="field-hint">8-64 位</span></div><div class="option-grid"><label v-for="(enabled, key) in passwordOptions" :key="key" class="check-option"><input v-model="passwordOptions[key]" type="checkbox" /><span>{{ { upper: '大写字母', lower: '小写字母', number: '数字', symbol: '符号' }[key] }}</span></label></div><div class="password-output"><code>{{ generatedPassword || '点击生成，密码不会保存' }}</code><button v-if="generatedPassword" class="icon-button" type="button" aria-label="复制密码" @click="copyText(generatedPassword, '密码已复制，请勿保存到不安全位置')"><Copy :size="16" /></button></div><button class="primary-button" type="button" @click="generatePassword"><KeyRound :size="16" /> 生成密码</button></div>
                 <div class="security-section"><div class="subheading"><LockKeyhole :size="16" /><h3>密码强度检测</h3></div><label for="password-check">仅在本机内存中检测</label><input id="password-check" v-model="passwordToCheck" class="form-control" type="password" autocomplete="new-password" placeholder="输入待检测密码" /><div class="strength-meter"><span :style="{ width: `${Math.min(passwordStrength.score / 6 * 100, 100)}%` }" :class="`strength-${passwordStrength.score}`"></span></div><div class="strength-label"><span>强度：{{ passwordStrength.label }}</span><span>{{ passwordStrength.score }}/6</span></div><div class="security-note"><ShieldCheck :size="15" /> 不会记录输入内容，也不会上传到云端。</div></div>
@@ -2520,15 +2778,10 @@ const statusLabel = computed(() => {
               <div class="security-divider"></div>
               <div class="redact-section"><div class="subheading"><ShieldCheck :size="16" /><h3>敏感信息脱敏副本</h3></div><div class="redact-grid"><div><label for="redact-source">原文</label><textarea id="redact-source" v-model="redactText" class="form-control" rows="5"></textarea></div><div><label for="redact-result">预览结果</label><textarea id="redact-result" :value="redactedText" class="form-control" rows="5" readonly placeholder="点击生成脱敏副本"></textarea></div></div><div class="action-row"><button class="outline-button" type="button" @click="redactSensitive"><ShieldCheck :size="16" /> 生成脱敏副本</button><span class="safe-hint">源文件与原文不会被覆盖</span></div></div>
             </section>
-            <aside class="side-rail"><section class="content-card boundary-card"><span class="boundary-icon"><LockKeyhole :size="17" /></span><h2>加密格式</h2><p>采用 OpenPGP 口令加密格式替代自定义容器，结果可由兼容 OpenPGP 的工具处理。</p><span class="field-hint">本地按需加载</span></section></aside>
           </div>
 
           <div v-else-if="activeModule === 'power'" class="workspace-grid power-page">
             <ShutdownWorkspace :runtime-mode="runtimeMode" @notify="showToast" />
-            <aside class="side-rail">
-              <section class="content-card info-card"><div class="card-heading"><h2>执行边界</h2><Power :size="17" /></div><p class="side-copy">仅创建一次性电源任务，动作枚举由桌面桥接层固定控制；浏览器模式不会调用系统命令。</p></section>
-              <section class="content-card boundary-card"><span class="boundary-icon"><ShieldCheck :size="17" /></span><h2>安全提示</h2><p>创建前必须确认完整参数。系统动作默认保留保存缓冲，不强制关闭应用；任务可在触发前取消。</p><span class="field-hint">Windows 10/11 桌面版</span></section>
-            </aside>
           </div>
 
           <div v-else-if="activeModule === 'assistant'" class="assistant-page">
@@ -2550,8 +2803,8 @@ const statusLabel = computed(() => {
       </main>
     </div>
 
-    <aside v-if="taskPanelOpen" class="task-drawer" aria-label="任务中心" :aria-hidden="onlineConsentRequest ? 'true' : undefined" :inert="onlineConsentRequest ? '' : undefined">
-      <div class="drawer-heading"><div><p class="eyebrow">工作流</p><h2>任务中心</h2></div><button class="icon-button" type="button" aria-label="关闭任务中心" @click="taskPanelOpen = false"><X :size="18" /></button></div>
+    <aside v-if="taskPanelOpen" class="task-drawer" :class="{ 'is-pinned': taskPanelPinned }" aria-label="任务中心" :aria-hidden="onlineConsentRequest ? 'true' : undefined" :inert="onlineConsentRequest ? '' : undefined">
+      <div class="drawer-heading"><div><p class="eyebrow">工作流</p><h2>任务中心</h2><small>{{ taskPanelPinned ? '已固定为第三栏' : '浮动抽屉' }}</small></div><div class="drawer-heading-actions"><button class="icon-button" type="button" :aria-label="taskPanelPinned ? '取消固定任务中心' : '固定任务中心'" :title="taskPanelPinned ? '取消固定任务中心' : '固定任务中心'" @click="toggleTaskPanelPin"><component :is="taskPanelPinned ? PinOff : Pin" :size="17" /></button><button class="icon-button" type="button" aria-label="关闭任务中心" title="关闭任务中心" @click="taskPanelOpen = false"><X :size="18" /></button></div></div>
       <div v-if="runningTasks.length" class="drawer-section"><div class="drawer-section-heading"><span>进行中</span><span>{{ runningTasks.length }}</span></div><div v-for="task in runningTasks" :key="task.id" class="task-row" :data-status="task.status"><div class="task-row-heading"><strong>{{ task.label }}</strong><button v-if="task.cancellable !== false && ['waiting', 'running'].includes(task.status)" class="icon-button" type="button" :aria-label="`取消 ${task.label}`" @click="cancelTask(task)"><Square :size="14" /></button></div><div class="task-status-line" role="status" aria-live="polite" aria-atomic="true"><span class="task-stage">{{ task.stage || '处理中' }}</span><span v-if="task.totalItems" class="task-count">已完成 {{ task.completedItems || 0 }}/{{ task.totalItems }} · 剩余 {{ task.remainingItems ?? task.totalItems }}</span></div><div class="progress-track" role="progressbar" :aria-label="`${task.label}进度`" aria-valuemin="0" aria-valuemax="100" :aria-valuenow="task.progress"><span :style="{ width: `${task.progress}%` }"></span></div><div class="task-meta"><span>{{ task.progress }}%</span><span v-if="task.status === 'canceling'">取消请求已发送</span><span v-else-if="task.cancellable === false">当前原子阶段不可中途取消</span><span v-else>{{ task.createdAt }}</span></div></div></div>
       <div class="drawer-section">
         <div class="drawer-section-heading"><span>最近完成</span><button v-if="completedTasks.length" class="text-button small" type="button" @click="requestClearCompletedTasks">清除</button></div>
@@ -2572,6 +2825,18 @@ const statusLabel = computed(() => {
       <div v-if="clearedTaskHistory.length" class="task-history-undo" role="status"><span>已清除 {{ clearedTaskHistory.length }} 条记录</span><button class="text-button small" type="button" @click="restoreClearedTaskHistory">撤销</button></div>
       <div class="drawer-boundary"><ShieldCheck :size="16" /><span>长任务状态只保存在本机，默认不上传文件内容。</span></div>
     </aside>
+
+    <div v-if="commandPaletteOpen" class="command-palette-backdrop" @click.self="closeCommandPalette">
+      <section class="command-palette" role="dialog" aria-modal="true" aria-labelledby="command-palette-title" @keydown="handleCommandPaletteKeydown">
+        <div class="command-palette-heading"><div><p class="eyebrow">工作台命令</p><h2 id="command-palette-title">命令面板</h2></div><button class="icon-button" type="button" aria-label="关闭命令面板" title="关闭命令面板" @click="closeCommandPalette"><X :size="17" /></button></div>
+        <label class="command-palette-input"><Command :size="17" aria-hidden="true" /><input id="command-palette-input" v-model="commandQuery" type="search" placeholder="搜索命令或工具" autocomplete="off" role="combobox" aria-autocomplete="list" aria-controls="command-palette-results" :aria-expanded="true" :aria-activedescendant="commandResults.length ? `command-option-${commandResults[commandActiveIndex]?.id}` : undefined" /></label>
+        <div id="command-palette-results" class="command-palette-results" role="listbox" aria-label="命令列表">
+          <button v-for="(command, index) in commandResults" :id="`command-option-${command.id}`" :key="command.id" class="command-option" :class="{ active: index === commandActiveIndex }" type="button" role="option" :aria-selected="index === commandActiveIndex" @mouseenter="commandActiveIndex = index" @click="runCommand(command)"><component :is="command.icon" :size="16" aria-hidden="true" /><span><strong>{{ command.label }}</strong><small>{{ command.description }}</small></span><ArrowRight :size="14" aria-hidden="true" /></button>
+          <p v-if="!commandResults.length" class="command-empty">没有匹配命令或工具。</p>
+        </div>
+        <div class="command-palette-footer"><span><kbd>↑</kbd><kbd>↓</kbd> 选择</span><span><kbd>Enter</kbd> 执行</span><span><kbd>Esc</kbd> 关闭</span></div>
+      </section>
+    </div>
 
     <div v-if="settingsOpen" class="modal-backdrop" @click.self="closeSettings">
       <section class="settings-modal" role="dialog" aria-modal="true" aria-labelledby="settings-title" :aria-hidden="onlineConsentRequest ? 'true' : undefined" :inert="onlineConsentRequest ? '' : undefined" @keydown="handleSettingsKeydown">
@@ -2667,8 +2932,9 @@ const statusLabel = computed(() => {
               </section>
 
               <section v-else id="settings-panel-tasks" class="settings-panel" role="tabpanel" aria-labelledby="settings-tab-tasks">
-                <div class="settings-list">
-                  <label class="setting-row"><span><strong>外观</strong><small>适合长时间办公的低对比度工作区</small></span><select v-model="theme" class="form-select"><option value="light">浅色</option><option value="dark">深色</option></select></label>
+                 <div class="settings-list">
+                   <label class="setting-row"><span><strong>外观</strong><small>适合长时间办公的低对比度工作区</small></span><select v-model="theme" class="form-select"><option value="light">浅色</option><option value="dark">深色</option></select></label>
+                   <label class="setting-row"><span><strong>工作区密度</strong><small>记住列表、工具卡片和间距的显示密度</small></span><select v-model="uiDensity" class="form-select"><option value="comfortable">舒适</option><option value="compact">紧凑</option></select></label>
                   <div class="setting-row"><span><strong>匿名崩溃统计</strong><small>当前版本未接入远程上报，保持关闭</small></span><span class="setting-fixed"><LockKeyhole :size="16" /> 已关闭</span></div>
                   <div class="setting-row"><span><strong>云端能力提示</strong><small>内容发送前始终显示供应商与用途</small></span><span class="setting-fixed"><CheckCircle2 :size="16" /> 已启用</span></div>
                   <div class="setting-row"><span><strong>联网授权</strong><small>{{ onlineConsentSummary }}；按用途和供应商绑定</small></span><button class="outline-button" type="button" :disabled="!hasOnlineConsent" @click="revokeOnlineConsent"><RotateCcw :size="15" /> 撤回授权</button></div>

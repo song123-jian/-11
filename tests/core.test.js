@@ -19,6 +19,8 @@ import { describeDocumentSelection, formatDocumentFileSize, selectDocumentFiles 
 import { loadState, PERSISTED_STATE_KEYS, removeState, saveState, STATE_SCHEMA_VERSION } from '../src/services/storage.js'
 import { restoreCompletedTasks, restoreTaskHistory, sanitizeTaskForStorage, separateCompletedTasks, serializeTaskHistory, TASK_HISTORY_SCHEMA_VERSION } from '../src/services/taskHistoryTools.js'
 import { normalizeQuickNote, normalizeRecentTools, normalizeReminders, normalizeTheme, normalizeTodos } from '../src/services/localStateModels.js'
+import { DEFAULT_UI_PREFS, normalizeDensity, normalizeUiPrefs } from '../src/services/uiPreferences.js'
+import { createToolRegistry, filterRegisteredTools } from '../src/services/toolRegistry.js'
 
 function createMemoryStorage() {
   const values = new Map()
@@ -42,6 +44,24 @@ test('global search supports recent tools, aliases, and keyboard-safe result ind
   assert.equal(normalizeSearchIndex(0, 0), -1)
   assert.equal(stepSearchIndex(-1, 3, -1), 2)
   assert.equal(stepSearchIndex(2, 3, 1), 0)
+})
+
+test('ui preferences normalize safe values and tool registry accepts extension definitions', () => {
+  assert.deepEqual(normalizeUiPrefs({ sidebarCollapsed: true, density: 'compact', lastTool: 'custom', taskPanelPinned: true }, ['custom']), {
+    sidebarCollapsed: true,
+    density: 'compact',
+    lastTool: 'custom',
+    taskPanelPinned: true,
+  })
+  assert.deepEqual(normalizeUiPrefs({ sidebarCollapsed: 'yes', density: 'wide', lastTool: 'missing' }, ['custom']), DEFAULT_UI_PREFS)
+  assert.equal(normalizeDensity('compact'), 'compact')
+  assert.equal(normalizeDensity('wide'), 'comfortable')
+
+  const registry = createToolRegistry([{ id: 'alpha', module: 'custom', label: 'Alpha', description: '扩展工具', aliases: ['测试'] }])
+  assert.equal(registry.register({ id: 'beta', module: 'custom', label: 'Beta' }), true)
+  assert.equal(registry.register({ id: 'alpha', module: 'custom', label: 'Duplicate' }), false)
+  assert.deepEqual(filterRegisteredTools(registry, '测试').map((tool) => tool.id), ['alpha'])
+  assert.deepEqual(filterRegisteredTools(registry, '', ['beta']).map((tool) => tool.id), ['beta', 'alpha'])
 })
 
 test('dependency status distinguishes desktop readiness, optional models, and offline recovery', () => {
@@ -174,6 +194,7 @@ test('local state reads legacy values, writes a versioned envelope, and preserve
     assert.equal(saveState('theme', 'light'), false)
     assert.deepEqual(JSON.parse(localStorage.getItem('efficiency-toolbox:theme')), { schemaVersion: 99, value: 'dark' })
     assert.equal(PERSISTED_STATE_KEYS.includes('tasks'), true)
+    assert.equal(PERSISTED_STATE_KEYS.includes('ui-prefs'), true)
     assert.equal(saveState('api-key', 'must-not-persist'), false)
     assert.equal(localStorage.getItem('efficiency-toolbox:api-key'), null)
     assert.equal(loadState('api-key', 'fallback'), 'fallback')

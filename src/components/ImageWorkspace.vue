@@ -8,6 +8,7 @@ import {
   FileImage,
   Image as ImageIcon,
   LockKeyhole,
+  Printer,
   RefreshCw,
   RotateCcw,
   Search,
@@ -42,6 +43,13 @@ import {
   snapshotCanvas,
 } from '../services/imageEditorTools.js'
 import { recognizeText } from '../services/ocrTools.js'
+import { PAPER_SIZES } from '../services/printSettings.js'
+import {
+  PHOTO_SHEET_DEFAULTS,
+  calculatePhotoSheetLayout,
+  printPhotoSheet as printPhotoSheetResult,
+  renderPhotoSheet,
+} from '../services/photoPrintTools.js'
 
 const props = defineProps({
   mode: { type: String, required: true },
@@ -167,6 +175,16 @@ const idPhotoFocalX = ref(0.5)
 const idPhotoFocalY = ref(0.46)
 const customWidthPx = ref(295)
 const customHeightPx = ref(413)
+const photoSheetPaperSize = ref(PHOTO_SHEET_DEFAULTS.paperSize)
+const photoSheetOrientation = ref(PHOTO_SHEET_DEFAULTS.orientation)
+const photoSheetCopies = ref(PHOTO_SHEET_DEFAULTS.copies)
+const photoSheetMarginMm = ref(PHOTO_SHEET_DEFAULTS.marginMm)
+const photoSheetGapMm = ref(PHOTO_SHEET_DEFAULTS.gapMm)
+const photoSheetDpi = ref(PHOTO_SHEET_DEFAULTS.dpi)
+const photoSheetCropMarks = ref(PHOTO_SHEET_DEFAULTS.cropMarks)
+const photoSheetResult = ref(null)
+const photoSheetPreview = ref('')
+const paperSizes = Object.values(PAPER_SIZES)
 
 const selectedIdPhotoSpec = computed(() => {
   if (idPhotoSpecId.value !== 'custom') return getIdPhotoSpec(idPhotoSpecId.value)
@@ -201,6 +219,9 @@ function chooseIdPhoto(event) {
   idPhotoPreview.value = createObjectUrl(file)
   idPhotoResult.value = null
   idPhotoResultPreview.value = ''
+  photoSheetResult.value = null
+  revokeObjectUrl(photoSheetPreview.value)
+  photoSheetPreview.value = ''
 }
 
 function runIdPhotoCrop() {
@@ -225,6 +246,9 @@ function runIdPhotoCrop() {
   idPhotoResult.value = null
   revokeObjectUrl(idPhotoResultPreview.value)
   idPhotoResultPreview.value = ''
+  photoSheetResult.value = null
+  revokeObjectUrl(photoSheetPreview.value)
+  photoSheetPreview.value = ''
   const task = props.startTask({
     operation: 'id-photo',
     label: '证件照裁剪',
@@ -254,6 +278,69 @@ function downloadIdPhoto() {
   if (!idPhotoResult.value) return
   downloadBlob(idPhotoResult.value.blob, idPhotoResult.value.filename)
   notify('证件照结果已下载')
+}
+
+const photoSheetLayout = computed(() => {
+  try {
+    return calculatePhotoSheetLayout(selectedIdPhotoSpec.value, {
+      paperSize: photoSheetPaperSize.value,
+      orientation: photoSheetOrientation.value,
+      copies: photoSheetCopies.value,
+      marginMm: photoSheetMarginMm.value,
+      gapMm: photoSheetGapMm.value,
+      dpi: photoSheetDpi.value,
+      cropMarks: photoSheetCropMarks.value,
+    })
+  } catch (error) {
+    return { error: error?.message || '版式参数无效' }
+  }
+})
+
+function currentPhotoSheetOptions() {
+  return {
+    paperSize: photoSheetPaperSize.value,
+    orientation: photoSheetOrientation.value,
+    copies: photoSheetCopies.value,
+    marginMm: photoSheetMarginMm.value,
+    gapMm: photoSheetGapMm.value,
+    dpi: photoSheetDpi.value,
+    cropMarks: photoSheetCropMarks.value,
+  }
+}
+
+async function runPhotoSheet() {
+  if (!idPhotoResult.value?.blob) {
+    notify('请先生成证件照，再进行相纸排版', 'error')
+    return
+  }
+  busy.value = true
+  try {
+    const result = await renderPhotoSheet(idPhotoResult.value.blob, selectedIdPhotoSpec.value, currentPhotoSheetOptions())
+    revokeObjectUrl(photoSheetPreview.value)
+    photoSheetResult.value = result
+    photoSheetPreview.value = createObjectUrl(result.blob)
+    notify('证件照相纸排版已生成')
+  } catch (error) {
+    notify(error?.message || '相纸排版失败', 'error')
+  } finally {
+    busy.value = false
+  }
+}
+
+function downloadPhotoSheet() {
+  if (!photoSheetResult.value) return
+  downloadBlob(photoSheetResult.value.blob, photoSheetResult.value.filename)
+  notify('相纸排版图已下载')
+}
+
+function printPhotoSheetNow() {
+  if (!photoSheetResult.value) return
+  try {
+    printPhotoSheetResult(photoSheetResult.value.blob, currentPhotoSheetOptions())
+    notify('已打开系统打印流程')
+  } catch (error) {
+    notify(error?.message || '无法打开打印流程', 'error')
+  }
 }
 
 // In-canvas text editing
@@ -593,6 +680,7 @@ onBeforeUnmount(() => {
   revokeObjectUrl(aiResultPreview.value)
   revokeObjectUrl(idPhotoPreview.value)
   revokeObjectUrl(idPhotoResultPreview.value)
+  revokeObjectUrl(photoSheetPreview.value)
   revokeObjectUrl(editorSourceUrl.value)
   busy.value = false
 })
@@ -647,6 +735,22 @@ onBeforeUnmount(() => {
       </div>
       <div class="id-photo-reference"><ShieldCheck :size="15" /><span><strong>规格要求参考</strong>{{ ID_PHOTO_SPEC_SOURCE }} · 更新于 {{ ID_PHOTO_SPEC_UPDATED_AT }}。不同学校、签证中心和办证机构可能要求不同背景色、尺寸或文件大小，请以实际通知为准。</span></div>
       <div v-if="idPhotoResult" class="image-result-block"><div class="result-callout"><CheckCircle2 :size="16" /><span>{{ idPhotoResult.summary }}</span><button class="outline-button" type="button" @click="downloadIdPhoto"><Download :size="15" /> 下载 JPG</button></div><div v-if="idPhotoResultPreview" class="image-preview result-preview id-photo-result-preview"><img :src="idPhotoResultPreview" alt="证件照裁剪结果预览" /></div></div>
+      <section v-if="idPhotoResult" class="photo-sheet-panel" aria-labelledby="photo-sheet-title">
+        <div class="card-heading"><div><h3 id="photo-sheet-title">证件照相纸排版</h3><small>复用当前证件照结果，按纸张尺寸生成可打印排版图。</small></div><Printer :size="18" aria-hidden="true" /></div>
+        <div class="photo-sheet-options">
+          <label>纸张<select v-model="photoSheetPaperSize" class="form-control"><option v-for="paper in paperSizes" :key="paper.id" :value="paper.id">{{ paper.label }} · {{ paper.widthMm }}×{{ paper.heightMm }} mm</option></select></label>
+          <label>方向<select v-model="photoSheetOrientation" class="form-control"><option value="portrait">纵向</option><option value="landscape">横向</option></select></label>
+          <label>份数<input v-model="photoSheetCopies" class="form-control" type="number" min="1" max="100" /></label>
+          <label>边距（mm）<input v-model="photoSheetMarginMm" class="form-control" type="number" min="0" max="30" step="1" /></label>
+          <label>间距（mm）<input v-model="photoSheetGapMm" class="form-control" type="number" min="0" max="20" step="1" /></label>
+          <label>清晰度（DPI）<select v-model="photoSheetDpi" class="form-control"><option :value="150">150</option><option :value="200">200</option><option :value="300">300</option></select></label>
+        </div>
+        <label class="check-option photo-sheet-crop"><input v-model="photoSheetCropMarks" type="checkbox" /> 显示裁剪标记</label>
+        <p class="field-hint photo-sheet-capacity" :class="{ 'photo-sheet-invalid': photoSheetLayout.error }">{{ photoSheetLayout.error || `当前版式：${photoSheetLayout.columns} 列 × ${photoSheetLayout.rows} 行，最多 ${photoSheetLayout.capacity} 张 · ${photoSheetLayout.paperWidthPx}×${photoSheetLayout.paperHeightPx} px` }}</p>
+        <div class="action-row"><button class="primary-button" type="button" :disabled="busy || Boolean(photoSheetLayout.error)" @click="runPhotoSheet"><Printer :size="15" /> {{ busy ? '排版中...' : '生成排版图' }}</button><button v-if="photoSheetResult" class="outline-button" type="button" @click="downloadPhotoSheet"><Download :size="15" /> 下载排版图</button><button v-if="photoSheetResult" class="outline-button" type="button" @click="printPhotoSheetNow"><Printer :size="15" /> 直接打印</button></div>
+        <div v-if="photoSheetPreview" class="image-preview result-preview photo-sheet-preview"><img :src="photoSheetPreview" alt="证件照相纸排版预览" /></div>
+        <div v-if="photoSheetResult" class="result-callout"><CheckCircle2 :size="16" /><span>{{ photoSheetResult.summary }}</span></div>
+      </section>
     </template>
 
     <template v-else>
