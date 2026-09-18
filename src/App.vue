@@ -88,6 +88,7 @@ import { filterSearchTools, normalizeSearchIndex, stepSearchIndex } from './serv
 import { normalizeRecentTools, normalizeTheme } from './services/localStateModels'
 import { DEFAULT_UI_PREFS, normalizeDensity, normalizeUiPrefs } from './services/uiPreferences'
 import { createToolRegistry } from './services/toolRegistry'
+import { formatNetworkConnectionLabel, networkConnectionPresentation } from './services/networkStatus'
 import AssistantWorkspace from './components/AssistantWorkspace.vue'
 import ImageWorkspace from './components/ImageWorkspace.vue'
 import ShutdownWorkspace from './components/ShutdownWorkspace.vue'
@@ -160,6 +161,7 @@ const networkToolIds = ['qr', 'barcode', 'speed', 'ip', 'ping', 'port']
 const imageToolIds = ['image-compress', 'screenshot', 'long-screenshot', 'watermark', 'stitch', 'image-ai', 'id-photo', 'image-text-edit']
 const securityToolIds = ['password', 'password-strength', 'crypto', 'redact']
 const advancedImageToolIds = new Set(['image-ai', 'id-photo', 'image-text-edit'])
+const onlineBoundaryToolIds = new Set(['relay-assistant', 'exchange', 'speed', 'ip', 'ping', 'port'])
 
 const storedUiPrefs = loadState('ui-prefs', DEFAULT_UI_PREFS)
 const initialUiPrefs = normalizeUiPrefs(storedUiPrefs, toolRegistry.ids())
@@ -369,7 +371,7 @@ const boundaryBar = computed(() => {
   if (activeModule.value === 'power') {
     return { title: '系统动作边界', detail: runtimeMode.value === 'tauri' ? '仅桌面桥接执行固定动作；创建前需确认完整参数，默认保留保存缓冲且可在触发前取消。' : '当前为浏览器预览，系统关机、重启和休眠需要桌面版。', attention: runtimeMode.value !== 'tauri', icon: Power }
   }
-  if (activeModule.value === 'network' || onlineToolIds.has(activeTool.value) || activeTool.value === 'relay-assistant') {
+  if (activeModule.value === 'network' || onlineBoundaryToolIds.has(activeTool.value)) {
     return { title: '联网权限边界', detail: '外部请求只在你点击并确认授权后执行；Ping 和端口检测由 Rust 白名单命令处理，不拼接 shell 字符串。', attention: networkOnline.value === false, icon: Network }
   }
   if (activeModule.value === 'image') {
@@ -405,15 +407,14 @@ const ccSwitchAppOptions = [
   { value: 'hermes', label: 'Hermes' },
 ]
 
-const onlineToolIds = new Set(['relay-assistant', 'exchange', 'speed', 'ip', 'ping', 'port'])
 const pluginToolIds = new Set(['office-pdf', 'ocr'])
 const desktopToolIds = new Set(['shutdown'])
+const networkAccess = computed(() => networkConnectionPresentation(networkOnline.value))
 
 function toolAccess(toolId) {
   if (desktopToolIds.has(toolId)) return { label: '桌面版', className: 'desktop' }
   if (pluginToolIds.has(toolId)) return { label: '需插件', className: 'plugin' }
-  if (onlineToolIds.has(toolId)) return { label: '需联网', className: 'online' }
-  return { label: '上线', className: 'available' }
+  return networkAccess.value
 }
 
 function describeRelayProvider(config) {
@@ -2574,8 +2575,7 @@ async function runTranslation() {
 }
 
 const statusLabel = computed(() => {
-  if (networkOnline.value === false) return runningTasks.value.length ? `当前离线 · ${runningTasks.value.length} 个任务进行中` : '当前离线'
-  return runningTasks.value.length ? `${runningTasks.value.length} 个任务进行中` : (runtimeMode.value === 'tauri' ? '桌面模式' : '浏览器本地模式')
+  return formatNetworkConnectionLabel(networkOnline.value, runningTasks.value.length)
 })
 </script>
 
@@ -2632,7 +2632,7 @@ const statusLabel = computed(() => {
           </div>
         </div>
          <div class="topbar-actions">
-           <span class="connection-label"><span class="status-dot" :class="{ offline: networkOnline === false }"></span>{{ statusLabel }}</span>
+           <span class="connection-label" role="status" aria-live="polite"><span class="status-dot" :class="{ offline: networkOnline === false }"></span>{{ statusLabel }}</span>
            <button class="command-trigger" type="button" aria-label="打开命令面板" title="命令面板 · Ctrl Shift P" @click="openCommandPalette"><Command :size="16" /><span>命令</span><kbd>Ctrl ⇧ P</kbd></button>
            <button class="task-button" :class="{ active: taskPanelOpen }" type="button" :aria-label="taskPanelOpen ? '关闭任务中心' : '打开任务中心'" @click="taskPanelOpen = !taskPanelOpen">
              <PanelRight :size="18" /><span>任务中心</span><b v-if="runningTasks.length">{{ runningTasks.length }}</b>
@@ -2976,7 +2976,7 @@ const statusLabel = computed(() => {
           </div>
 
           <div v-else-if="activeModule === 'assistant'" class="assistant-page">
-            <AssistantWorkspace v-model:active-tab="assistantActiveTab" @open-tool="useToolById" @notify="showToast">
+            <AssistantWorkspace v-model:active-tab="assistantActiveTab" :network-online="networkOnline !== false" @open-tool="useToolById" @notify="showToast">
               <template #translation="{ saveNote }">
                 <section class="content-card assistant-card translation-card" aria-labelledby="translation-assistant-title">
                   <div class="card-heading">

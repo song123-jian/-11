@@ -45,6 +45,7 @@ import {
   Zap,
 } from 'lucide-vue-next'
 import { loadState, saveState } from '../services/storage'
+import { networkConnectionPresentation } from '../services/networkStatus'
 import ToolEntryCard from './ToolEntryCard.vue'
 import {
   ASSISTANT_SCHEMA_VERSION,
@@ -74,6 +75,7 @@ import {
 
 const props = defineProps({
   activeTab: { type: String, default: 'overview' },
+  networkOnline: { type: Boolean, default: true },
 })
 
 const emit = defineEmits(['open-tool', 'notify', 'update:activeTab'])
@@ -138,19 +140,23 @@ watch(assistant, () => {
   queuePersist()
 }, { deep: true })
 
-const assistantTabs = [
-  { id: 'overview', label: '效率总览', icon: BarChart3, description: '汇总任务、专注与提醒数据', status: '上线', statusClass: 'available' },
-  { id: 'todos', label: '待办清单', icon: ClipboardList, description: '优先级、标签、截止时间与子任务', status: '上线', statusClass: 'available' },
-  { id: 'focus', label: '番茄钟', icon: Timer, description: '专注方案、自动循环与趋势统计', status: '上线', statusClass: 'available' },
-  { id: 'reminders', label: '日历提醒', icon: CalendarDays, description: '重复规则、提前提醒与月视图', status: '上线', statusClass: 'available' },
-  { id: 'notes', label: '快捷便签', icon: FileText, description: '自动保存、分类检索与任务转换', status: '上线', statusClass: 'available' },
-  { id: 'toolbox', label: '办公工具箱', icon: ListFilter, description: '计时、文本处理、二维码与换算', status: '上线', statusClass: 'available' },
-  { id: 'meeting', label: '会议纪要', icon: Users, description: '记录要点并一键提取待办', status: '上线', statusClass: 'available' },
-  { id: 'templates', label: '模板库', icon: BookOpen, description: '工作计划、复盘与会议模板', status: '上线', statusClass: 'available' },
-  { id: 'translation', label: '翻译助手', icon: Languages, description: '保留格式并生成多语言译文', status: '需联网', statusClass: 'online' },
-  { id: 'ai', label: 'AI 助手', icon: Sparkles, description: '调用已配置的中转站模型', status: '需联网', statusClass: 'online' },
+const assistantTabDefinitions = [
+  { id: 'overview', label: '效率总览', icon: BarChart3, description: '汇总任务、专注与提醒数据' },
+  { id: 'todos', label: '待办清单', icon: ClipboardList, description: '优先级、标签、截止时间与子任务' },
+  { id: 'focus', label: '番茄钟', icon: Timer, description: '专注方案、自动循环与趋势统计' },
+  { id: 'reminders', label: '日历提醒', icon: CalendarDays, description: '重复规则、提前提醒与月视图' },
+  { id: 'notes', label: '快捷便签', icon: FileText, description: '自动保存、分类检索与任务转换' },
+  { id: 'toolbox', label: '办公工具箱', icon: ListFilter, description: '计时、文本处理、二维码与换算' },
+  { id: 'meeting', label: '会议纪要', icon: Users, description: '记录要点并一键提取待办' },
+  { id: 'templates', label: '模板库', icon: BookOpen, description: '工作计划、复盘与会议模板' },
+  { id: 'translation', label: '翻译助手', icon: Languages, description: '保留格式并生成多语言译文' },
+  { id: 'ai', label: 'AI 助手', icon: Sparkles, description: '调用已配置的中转站模型' },
 ]
-const assistantTabIds = new Set(assistantTabs.map((tab) => tab.id))
+const assistantTabs = computed(() => {
+  const status = networkConnectionPresentation(props.networkOnline)
+  return assistantTabDefinitions.map((tab) => ({ ...tab, status: status.label, statusClass: status.className }))
+})
+const assistantTabIds = new Set(assistantTabDefinitions.map((tab) => tab.id))
 const normalizeAssistantTab = (tab) => assistantTabIds.has(tab) ? tab : 'overview'
 const assistantTab = ref(normalizeAssistantTab(props.activeTab))
 const dashboardPeriod = ref('week')
@@ -1264,8 +1270,8 @@ onBeforeUnmount(() => {
       <div class="assistant-section-heading"><div><p class="eyebrow">即用模板</p><h2>模板库</h2><p>从常用办公场景开始，减少重复编辑。</p></div><BookOpen :size="19" /></div><div class="template-grid"><article v-for="template in templates" :key="template.id" class="template-item"><div class="template-icon"><ClipboardList v-if="template.type === 'todo'" :size="20" /><FileText v-else :size="20" /></div><div><h3>{{ template.title }}</h3><p>{{ template.description }}</p><small v-if="template.items">{{ template.items.length }} 项待办</small><small v-else>结构化便签</small></div><button class="outline-button" type="button" @click="applyTemplate(template)"><Plus :size="15" /> 套用</button></article></div>
     </section>
 
-    <section v-else-if="assistantTab === 'translation'" class="assistant-translation-slot"><slot name="translation" :save-note="saveExternalNote"></slot></section>
+    <section v-else-if="assistantTab === 'translation'" class="assistant-feature-panel assistant-translation-slot"><slot name="translation" :save-note="saveExternalNote"></slot></section>
 
-    <section v-else-if="assistantTab === 'ai'" class="assistant-ai-slot"><slot name="ai"></slot></section>
+    <section v-else-if="assistantTab === 'ai'" class="assistant-feature-panel assistant-ai-slot"><slot name="ai"></slot></section>
   </section>
 </template>
