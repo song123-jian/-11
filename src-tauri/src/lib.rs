@@ -1,8 +1,10 @@
 use rusqlite::{Connection, OpenFlags};
 use serde::{Deserialize, Serialize};
 use std::{
+    backtrace::Backtrace,
     collections::HashMap,
     ffi::OsStr,
+    fs::OpenOptions,
     io::{Read, Write},
     net::{SocketAddr, TcpStream, ToSocketAddrs},
     path::{Path, PathBuf},
@@ -13,8 +15,57 @@ use std::{
     },
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
+use tauri::Manager;
 
+mod reminder;
 mod shutdown;
+
+fn install_diagnostic_panic_hook() {
+    let Some(path) = std::env::var_os("EFFICIENCY_DIAGNOSTIC_PANIC_LOG") else {
+        return;
+    };
+    static INSTALLED: OnceLock<()> = OnceLock::new();
+    let path = PathBuf::from(path);
+    let _ = INSTALLED.get_or_init(|| {
+        std::panic::set_hook(Box::new(move |panic_info| {
+            let timestamp = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|value| value.as_millis())
+                .unwrap_or_default();
+            let backtrace = Backtrace::force_capture();
+            let entry =
+                format!("timestampMs={timestamp}\npanic={panic_info}\nbacktrace={backtrace}\n");
+            if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(&path) {
+                let _ = file.write_all(entry.as_bytes());
+            }
+            eprintln!("efficiency-toolbox panic: {entry}");
+        }));
+    });
+}
+
+fn configure_portable_data_dir() {
+    let Ok(executable) = std::env::current_exe() else {
+        return;
+    };
+    let Some(directory) = executable.parent() else {
+        return;
+    };
+    let marker = directory.join("portable.flag");
+    if !marker.is_file() {
+        return;
+    }
+    let data_directory = directory.join("data");
+    let webview_directory = data_directory.join("webview");
+    if let Err(error) = std::fs::create_dir_all(&webview_directory) {
+        eprintln!(
+            "portable mode unavailable; cannot create {}: {error}",
+            webview_directory.display()
+        );
+        return;
+    }
+    std::env::set_var("EFFICIENCY_PORTABLE_DATA_DIR", &data_directory);
+    std::env::set_var("WEBVIEW2_USER_DATA_FOLDER", &webview_directory);
+}
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -1455,9 +1506,21 @@ async fn probe_port(
 }
 
 pub fn run() {
+    configure_portable_data_dir();
+    install_diagnostic_panic_hook();
+    let reminder_fire_mode = reminder::configure_reminder_fire_mode();
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_deep_link::init())
+        .plugin(tauri_plugin_notification::init())
+        .setup(move |app| {
+            if reminder_fire_mode {
+                if let Some(window) = app.get_webview_window("main") {
+                    let _ = window.hide();
+                }
+            }
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             runtime_info,
             dependency_status,
@@ -1469,6 +1532,10 @@ pub fn run() {
             relay_test_connection,
             relay_chat,
             read_ccswitch_providers,
+            reminder::reminder_scheduler_capabilities,
+            reminder::reconcile_reminder_schedules,
+            reminder::reminder_fire_context,
+            reminder::complete_reminder_fire,
             shutdown::power_capabilities,
             shutdown::power_schedule_status,
             shutdown::schedule_power_action,

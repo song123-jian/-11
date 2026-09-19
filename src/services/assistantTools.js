@@ -54,6 +54,7 @@ const TODO_CATEGORY_IDS = new Set(TODO_CATEGORIES.map((item) => item.id))
 const NOTE_CATEGORY_IDS = new Set(NOTE_CATEGORIES.map((item) => item.id))
 const REMINDER_CATEGORY_IDS = new Set(REMINDER_CATEGORIES.map((item) => item.id))
 const RECURRENCE_IDS = new Set(REMINDER_RECURRENCES.map((item) => item.id))
+const REMINDER_DELIVERY_STATUSES = new Set(['pending', 'delivered', 'fallback', 'failed'])
 
 function boundedText(value, maximum = MAX_TEXT) {
   return typeof value === 'string' ? value.trim().slice(0, maximum) : ''
@@ -72,6 +73,7 @@ function integer(value, fallback, minimum, maximum) {
 }
 
 function validTimestamp(value) {
+  if (value === null || value === undefined || value === '') return null
   const timestamp = value instanceof Date ? value.getTime() : new Date(value).getTime()
   return Number.isFinite(timestamp) ? timestamp : null
 }
@@ -207,6 +209,11 @@ export function normalizeAssistantReminders(value, fallback = []) {
       at,
       notified: item?.notified === true,
       lastNotifiedAt: validTimestamp(item?.lastNotifiedAt) ?? null,
+      lastAttemptAt: validTimestamp(item?.lastAttemptAt) ?? null,
+      retryAfterAt: validTimestamp(item?.retryAfterAt) ?? null,
+      deliveryStatus: REMINDER_DELIVERY_STATUSES.has(item?.deliveryStatus)
+        ? item.deliveryStatus
+        : item?.notified === true ? 'delivered' : 'pending',
       category: REMINDER_CATEGORY_IDS.has(item?.category) ? item.category : 'other',
       starred: item?.starred === true,
       advanceMinutes: [0, 10, 60, 1_440].includes(Number(item?.advanceMinutes)) ? Number(item.advanceMinutes) : 0,

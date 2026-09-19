@@ -118,13 +118,16 @@ function cargoPackageLicenses() {
 }
 
 const packageJson = readJson('package.json')
+const tauriConfig = readJson('src-tauri/tauri.conf.json')
 const pnpmLock = fs.readFileSync(path.resolve(root, 'pnpm-lock.yaml'), 'utf8')
 const cargoLock = fs.readFileSync(path.resolve(root, 'src-tauri/Cargo.lock'), 'utf8')
 const frontendDependencies = { ...packageJson.dependencies, ...packageJson.devDependencies }
 const cargoLicenses = cargoPackageLicenses()
 const exe = 'src-tauri/target/release/efficiency_toolbox.exe'
-const installer = 'src-tauri/target/release/bundle/nsis/效率百宝箱_0.1.0_x64-setup.exe'
-const artifactSignatures = [signatureStatus(exe), signatureStatus(installer)]
+const installer = `src-tauri/target/release/bundle/nsis/${tauriConfig.productName}_${tauriConfig.version}_x64-setup.exe`
+const portable = `output/portable/${tauriConfig.productName}_${tauriConfig.version}_x64-portable/efficiency_toolbox.exe`
+const artifactPaths = [exe, installer, ...(fs.existsSync(path.resolve(root, portable)) ? [portable] : [])]
+const artifactSignatures = artifactPaths.map(signatureStatus)
 const updateSigner = loadUpdateSigner()
 const manifest = {
   schemaVersion: 1,
@@ -160,10 +163,7 @@ const manifest = {
     hashFile('src-tauri/Cargo.toml'),
     hashFile('src-tauri/Cargo.lock'),
   ],
-  artifacts: [
-    { ...hashFile(exe), signature: signatureStatus(exe) },
-    { ...hashFile(installer), signature: signatureStatus(installer) },
-  ],
+  artifacts: artifactPaths.map((artifact) => ({ ...hashFile(artifact), signature: signatureStatus(artifact) })),
   signing: {
     packageSignatureRequired: true,
     updateManifestSignatureRequired: true,

@@ -37,6 +37,14 @@ powershell -ExecutionPolicy Bypass -File tools/measure_idle_baseline.ps1
 
 结果写入 `output/performance/idle-baseline.json`；该结果属于当前设备预基线，不替代冻结参考设备的正式发布门禁。最新结果仅 8/10 成功采样，第 9 分钟前进程退出且 `crashFree=false`，因此不能作为通过门禁证据；本次不重跑。空闲采样期间可以并行执行 `pnpm test`、`cargo test`、静态检查或其他不启动/重建同一 Release EXE 的测试；并行运行会争用 CPU/IO，不能把并行数据当作隔离性能 P95。启动 Release EXE 的三个采样脚本共享互斥锁，彼此并行时会拒绝启动，避免测试夹具互相结束进程。
 
+定位空闲退出原因时使用独立诊断夹具（默认 10 分钟、每 60 秒记录一次）：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File tools/measure_idle_diagnostic.ps1
+```
+
+诊断结果写入 `output/performance/idle-diagnostics/<runId>/`，包括 Rust panic、WebView2 日志、进程树和 Windows Application Error/WER 事件。命令行只记录是否存在，不写入完整参数，避免 `ccswitch://` 深链接或 API Key 进入日志；所有文件仅保存在本机，不会自动上传。该夹具用于定位，不替代正式 10 分钟门禁，也不会自动重跑用户已明确跳过的采样。
+
 可按 V2.0 的启动会话口径默认执行 200 次 Release EXE 稳定性采样（每次验证主窗口就绪，随后由测试夹具结束进程树；仍可通过 `-Samples` 显式增加样本）：
 
 ```powershell
@@ -128,6 +136,32 @@ $env:EFFICIENCY_LIBREOFFICE_PATH = (Resolve-Path output/validation/libreoffice-2
 NSIS 安装器输出到 `src-tauri/target/release/bundle/nsis/效率百宝箱_0.1.0_x64-setup.exe`；当前安装器未配置代码签名证书。
 Release profile 已启用 LTO、单 codegen 单元、符号剥离和 `panic=abort`，用于减小发布产物体积；这不会替代代码签名或正式发布门禁。
 
+可将现有 Release EXE 打包为无需安装器的便携 ZIP（脚本不会替你重建 EXE）：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File tools/package_portable.ps1
+```
+
+输出位于 `output/portable/效率百宝箱_0.1.0_x64-portable.zip`，包含 `portable.flag`、本地 WebView2 数据目录说明和 EXE SHA-256。便携包不写注册表、不创建服务且不要求管理员权限，但仍需要 Windows 10/11 与 WebView2 Runtime；发布前应先用当前源码重建 Release EXE，再执行该脚本。签名时可把便携 EXE 传给 `tools/sign_release.ps1 -PortableExePath`，无证书或时间戳时脚本 fail-closed。
+
+## Supabase 云同步（默认建议，可选启用）
+
+云同步采用“本地优先、登录后自动同步”的方案。默认项目 API 地址为 `https://mdptlabjdscjusfmdczm.supabase.co`；未配置 publishable/anon key、未登录、未授权或断网时，所有本地功能继续可用，不会自动发出云请求。
+
+首次配置时复制 `.env.example` 为 `.env.local`，只在本机填写 Supabase 的 publishable key（也兼容 `VITE_SUPABASE_ANON_KEY`），然后重启 Vite：
+
+```powershell
+Copy-Item .env.example .env.local
+# 编辑 .env.local，填写 VITE_SUPABASE_PUBLISHABLE_KEY
+pnpm exec vite --host 127.0.0.1 --port 4173 --strictPort
+```
+
+不要把 key 写入源码、提交到 Git，或发送到聊天/工单；客户端只使用 publishable/anon key，不需要 `service_role`。如果使用其他 Supabase 项目，可在 `.env.local` 覆盖 `VITE_SUPABASE_URL`，必须填写项目 API 根地址而不是 Dashboard 地址。
+
+数据库首次部署由项目管理员在 Supabase SQL Editor 执行 [`supabase/migrations/202609190001_user_app_state.sql`](supabase/migrations/202609190001_user_app_state.sql)。迁移创建 `user_app_state` 表、用户级 RLS、更新时间触发器、最小权限授权和 1.5 MB UTF-8 载荷约束；本地开发实现已完成，但本环境尚未执行或验收远程 SQL。
+
+登录并同意“Supabase 云同步”用途后，默认同步三个白名单命名空间：`assistant`、`tasks`、`ui-prefs`。首次登录/首次恢复时以远端状态为准；登录后本机发生修改时，以本机脏数据为准并自动上传，上传期间的新修改会排队到下一轮，不会被覆盖。同步内容只包含待办/提醒元数据、任务历史白名单和界面偏好；便签正文、会议参会人/核心要点/行动项、翻译原文/译文、文件及文件名、API Key、中转站配置、诊断日志均不会上传。设置页可查看状态、立即同步或退出账号；退出只清理云会话，本地数据保留。
+
 ## 已实现能力
 
 - 工作台：采用 VS Code/Postman 风格的可折叠导航与全宽工作区；侧栏支持 234px 导航与 64px 图标轨，状态会记住折叠态和舒适/紧凑密度。全局搜索支持名称、别名/关键词与最近使用排序；Ctrl+Shift+P 打开命令面板，可用上下箭头、Home/End、Enter 执行布局、任务中心、设置和工具命令；工具通过统一注册表进入搜索与命令面板，新工具只需提供 id、模块、标签、说明和图标即可扩展。首页新增“图像类专区”，集中展示图片压缩、截图、长截图、批量水印、长图拼接、AI 图片增强、证件照裁剪和图片文字编辑，并可一键进入对应工具。设置中心采用桌面双栏结构，分为“API 设置”和“任务选项”：API 设置集中管理本地 OCR（无需 Token）、DeepSeek 默认预设、自定义中转站和 CC Switch A+B+C；任务选项承载外观、工作区密度、联网授权、运行依赖、更新状态与隐私诊断，并提供受影响工具的入口。
@@ -144,11 +178,13 @@ Release profile 已启用 LTO、单 codegen 单元、符号剥离和 `panic=abor
 
 ### 工作台扩展约定
 
-工具入口统一由 `src/services/toolRegistry.js` 管理。内置工具和后续插件使用相同定义：`id`、`module`、`label`、`description`、`icon`，可选 `aliases`；注册后自动进入全局搜索和命令面板。任务中心默认以浮动抽屉显示，点击图钉可固定为第三栏；模块页顶部的边界/依赖条会在缺失 LibreOffice、桌面桥接或网络时高亮，并可按当前会话关闭。所有顶层工具入口统一采用“图标块 + 标题 + 说明 + 状态徽标”的卡片组件 `ToolEntryCard`，保持选中态、禁用态和响应式栅格一致。首页“快速开始”按最近使用优先、其余按注册表顺序完整展示；无论从首页、全局搜索、命令面板还是模块内卡片进入工具，都会统一更新最近使用顺序，模块卡片标题随当前工具动态显示。效率助手卡片通过 `v-model:active-tab` 直达待办、番茄钟、提醒、翻译和 AI 页签。
+工具入口统一由 `src/services/toolRegistry.js` 管理。内置工具和后续插件使用相同定义：`id`、`module`、`label`、`description`、`icon`，可选 `aliases`；注册后自动进入全局搜索和命令面板。任务中心默认以浮动抽屉显示，点击图钉可固定为第三栏；模块页顶部的边界/依赖条会在缺失 LibreOffice、桌面桥接或网络时高亮，并可按当前会话关闭。所有顶层工具入口统一采用“图标块 + 标题 + 说明 + 状态徽标”的卡片组件 `ToolEntryCard`，保持选中态、禁用态和响应式栅格一致。首页“快速开始”按最近使用优先、其余按注册表顺序完整展示；无论从首页、全局搜索、命令面板还是模块内卡片进入工具，都会统一更新最近使用顺序，模块卡片标题随当前工具动态显示。效率助手卡片通过 `v-model:active-tab` 直达待办、番茄钟、提醒、翻译和 AI 页签。顶部返回按钮和命令面板的“返回上一步”共用内存导航历史，最多保留 30 个模块、工具和效率助手页签状态；支持 `Alt+←`，历史不写入本地存储，也不包含正文、文件或表单内容。文档任务运行期间切换会遵守忙碌保护，返回后主内容会恢复焦点并播报当前位置。
 
 ### 效率助手使用说明
 
 效率助手以标签页方式组织日常工作流，所有待办、提醒、便签、专注会话、会议纪要和模板数据均由 `assistant` 状态统一管理，并在输入变化后自动保存到本机。快捷键 `Ctrl+Alt+T`、`Ctrl+Alt+N`、`Ctrl+Alt+F` 分别打开待办、便签和番茄钟；顶部工具栏可导出完整 JSON 备份或待办 CSV，也可从 JSON 备份恢复。导入会替换当前效率助手数据，执行前会显示确认提示。
+
+- 导航返回：顶部左箭头、命令面板“返回上一步”和 `Alt+←` 可按进入顺序回退模块、工具或效率助手页签。历史仅存在当前窗口内，刷新、关闭应用或超过 30 条后不会恢复/继续累积；在输入框、文本域、选择框或可编辑区域内不会拦截 `Alt+←`。
 
 - 任务管理：新增待办时可同时设置优先级、分类、标签、截止时间、首个子任务和截止提醒；列表支持搜索、按优先级/截止时间排序、逾期标记、批量完成/删除/改元数据、拖拽排序及重要-紧急四象限。
 - 专注与统计：在方案库中保存工作、短休、长休和长休触发周期；专注可关联待办并累计投入分钟数，自动循环会在工作与休息阶段间轮转；总览仪表盘可切换日/周/月并显示对应周期的待办完成、新建数量和专注汇总，番茄钟页同时展示日/周/月时长、番茄数和近七日趋势。白噪音只在用户开启且浏览器支持 Web Audio 时播放。
@@ -221,6 +257,10 @@ PDF、ZIP、OCR、图片和加密工具均生成副本，不覆盖源文件。�
 - 安全边界：前端只能提交固定动作、时间和受限 requestId；Rust IPC 再次校验并以取消令牌保护调度状态。浏览器模式只展示预览，不调用系统命令。
 
 当前基础版不包含周期/空闲/进程退出/负载阈值触发、系统托盘、开机自启、多任务并行、自定义脚本或强制关闭程序。真实电源动作应在 Windows 桌面版或隔离测试设备上验证，浏览器验收仅覆盖参数、状态和布局。
+
+### 提醒的系统级兜底
+
+效率助手提醒由应用级调度器每 15 秒扫描，并优先使用 Tauri 原生通知；权限被拒绝或通知桥不可用时回退到浏览器/应用内提示，并保留重试状态。Windows 桌面版同时把未来的一次性提醒同步到当前用户的 Task Scheduler，任务名使用 `EfficiencyToolbox.Reminder.<id>`，不要求管理员权限。到点时由 `--reminder-fire <id>` 隐藏唤起应用，只处理对应提醒，尝试发送原生通知或执行回退策略后自动退出；创建、取消或 IPC 失败会在应用仍运行时的下一次扫描重试。该系统调度能力尚未在真实 Windows Task Scheduler 上触发验收，浏览器模式不创建系统任务。
 
 ## 已知限制
 

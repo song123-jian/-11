@@ -18,6 +18,7 @@ serde_json = "1.0"
 tauri = { version = "2.0.0", features = [] }
 tauri-plugin-dialog = "2"
 tauri-plugin-deep-link = "2.4.10"
+tauri-plugin-notification = "2.3.1"
 url = "2"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 tokio = { version = "1", features = ["macros", "time"] }

@@ -30,7 +30,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self' ipc: http://ipc.localhost; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; script-src 'self' blob: https://cdn.jsdelivr.net; worker-src 'self' blob: https://cdn.jsdelivr.net; connect-src 'self' ipc: http://ipc.localhost https://api.frankfurter.dev https://api64.ipify.org https://speed.cloudflare.com https://cdn.jsdelivr.net"
+      "csp": "default-src 'self' ipc: http://ipc.localhost; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; script-src 'self' blob: https://cdn.jsdelivr.net; worker-src 'self' blob: https://cdn.jsdelivr.net; connect-src 'self' ipc: http://ipc.localhost https://api.frankfurter.dev https://api64.ipify.org https://speed.cloudflare.com https://cdn.jsdelivr.net https://mdptlabjdscjusfmdczm.supabase.co"
     }
   },
   "bundle": {

@@ -2,6 +2,7 @@
 param(
     [string]$ExePath,
     [string]$InstallerPath,
+    [string]$PortableExePath,
     [string]$CertificateThumbprint = $env:EFFICIENCY_CODE_SIGN_CERTIFICATE_THUMBPRINT,
     [string]$TimestampServer = $env:EFFICIENCY_TIMESTAMP_SERVER
 )
@@ -32,6 +33,8 @@ function Get-DefaultInstallerPath() {
 if (-not $InstallerPath) { $InstallerPath = Get-DefaultInstallerPath }
 $exe = Resolve-ExistingFile $ExePath 'Release EXE'
 $installer = Resolve-ExistingFile $InstallerPath 'NSIS installer'
+$portableExe = $null
+if ($PortableExePath) { $portableExe = Resolve-ExistingFile $PortableExePath 'Portable EXE' }
 $thumbprint = ($CertificateThumbprint -replace '\s', '').ToUpperInvariant()
 if (-not $thumbprint) {
     throw 'EFFICIENCY_CODE_SIGN_CERTIFICATE_THUMBPRINT is required; refusing unsigned signing'
@@ -53,7 +56,7 @@ $codeSigningOid = '1.3.6.1.5.5.7.3.3'
 $hasCodeSigningEku = @($certificate.Extensions | Where-Object { $_.Oid.Value -eq $codeSigningOid }).Count -gt 0
 if (-not $hasCodeSigningEku) { throw 'Certificate lacks code-signing EKU (1.3.6.1.5.5.7.3.3); refusing to continue' }
 
-foreach ($artifact in @($exe, $installer)) {
+foreach ($artifact in @($exe, $installer, $portableExe) | Where-Object { $_ }) {
     $result = Set-AuthenticodeSignature -LiteralPath $artifact -Certificate $certificate -TimestampServer $TimestampServer
     $status = $result.Status.ToString()
     Write-Host ("Signed {0}: {1}" -f $artifact, $status)

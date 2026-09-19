@@ -3,6 +3,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import {
   Archive,
   ArrowDown,
+  ArrowLeft,
   ArrowLeftRight,
   ArrowRight,
   ArrowUp,
@@ -89,9 +90,12 @@ import { normalizeRecentTools, normalizeTheme } from './services/localStateModel
 import { DEFAULT_UI_PREFS, normalizeDensity, normalizeUiPrefs } from './services/uiPreferences'
 import { createToolRegistry } from './services/toolRegistry'
 import { formatNetworkConnectionLabel, networkConnectionPresentation } from './services/networkStatus'
-import AssistantWorkspace from './components/AssistantWorkspace.vue'
+import { createNavigationHistory, normalizeNavigationSnapshot } from './services/navigationHistory'
+import { SUPABASE_CONFIG } from './services/supabaseConfig'
+import { createSupabaseSyncManager, SUPABASE_SYNC_NAMESPACES } from './services/supabaseSync'
+import AssistantModuleWorkspace from './components/AssistantModuleWorkspace.vue'
 import ImageWorkspace from './components/ImageWorkspace.vue'
-import ShutdownWorkspace from './components/ShutdownWorkspace.vue'
+import PowerModuleWorkspace from './components/PowerModuleWorkspace.vue'
 import PrintWorkspace from './components/PrintWorkspace.vue'
 import ToolWorkspace from './components/ToolWorkspace.vue'
 import ToolEntryCard from './components/ToolEntryCard.vue'
@@ -192,6 +196,13 @@ const clearedTaskHistory = ref([])
 const mobileNavOpen = ref(false)
 const settingsOpen = ref(false)
 const settingsPanel = ref('api')
+const supabaseSyncStatus = ref(null)
+const supabaseEmail = ref('')
+const supabasePassword = ref('')
+const supabaseAuthMode = ref('sign-in')
+const supabaseAuthBusy = ref(false)
+const supabaseSyncBusy = ref(false)
+let applyingSupabaseRemoteState = false
 const diagnosticPreview = ref(null)
 const diagnosticBusy = ref(false)
 const ocrRuntimeBusy = ref(false)
@@ -242,6 +253,73 @@ const ccSwitchExportError = ref('')
 const stopJobs = new Map()
 const retryJobs = new Map()
 const onlineTaskDisclosures = new Map()
+
+function applySupabaseRemoteState(namespace, value) {
+  if (!SUPABASE_SYNC_NAMESPACES.includes(namespace)) return
+  applyingSupabaseRemoteState = true
+  try {
+    if (namespace === 'tasks') {
+      tasks.value = restoreTaskHistory(value)
+      persistTasks()
+      return
+    }
+    if (namespace === 'ui-prefs') {
+      const normalized = normalizeUiPrefs(value, toolRegistry.ids())
+      sidebarCollapsed.value = normalized.sidebarCollapsed
+      uiDensity.value = normalized.density
+      taskPanelPinned.value = normalized.taskPanelPinned
+      const remoteTool = normalized.lastTool ? toolRegistry.get(normalized.lastTool) : null
+      if (remoteTool) {
+        activeModule.value = remoteTool.module
+        activeTool.value = remoteTool.id
+        if (remoteTool.module === 'assistant') {
+          assistantActiveTab.value = assistantToolTabs[remoteTool.id] || 'overview'
+        } else if (remoteTool.module === 'docs' && !docBusy.value) {
+          openDocMode(remoteTool.id, { recordHistory: false })
+        }
+      }
+      const translation = normalizeTranslationPreferences(value?.translation)
+      translationSourceLanguage.value = translation.sourceLanguage
+      translationTargetLanguage.value = translation.targetLanguage
+      translationStyle.value = translation.style
+      translationPreserveFormatting.value = translation.preserveFormatting
+      persistUiPrefs()
+      return
+    }
+    saveState('assistant', value)
+    if (typeof window !== 'undefined' && typeof window.dispatchEvent === 'function' && typeof window.CustomEvent === 'function') {
+      window.dispatchEvent(new window.CustomEvent('efficiency-state-remote', { detail: { namespace, value } }))
+    }
+  } finally {
+    void nextTick(() => {
+      applyingSupabaseRemoteState = false
+    })
+  }
+}
+
+const supabaseSyncManager = createSupabaseSyncManager({
+  config: SUPABASE_CONFIG,
+  getLocalState: (namespace) => {
+    if (namespace === 'tasks') return serializeTaskHistory(tasks.value)
+    if (namespace === 'ui-prefs') return {
+      sidebarCollapsed: sidebarCollapsed.value,
+      density: uiDensity.value,
+      lastTool: activeTool.value,
+      taskPanelPinned: taskPanelPinned.value,
+      translation: normalizeTranslationPreferences({
+        sourceLanguage: translationSourceLanguage.value,
+        targetLanguage: translationTargetLanguage.value,
+        style: translationStyle.value,
+        preserveFormatting: translationPreserveFormatting.value,
+      }),
+    }
+    return loadState('assistant', null)
+  },
+  applyRemoteState: applySupabaseRemoteState,
+  onStatus: (status) => { supabaseSyncStatus.value = status },
+  canAutoSync: () => networkOnline.value !== false && isConsentGranted(onlineConsent.value, supabaseSyncDisclosure()),
+})
+supabaseSyncStatus.value = supabaseSyncManager.getStatus()
 
 const toolSearchAliases = {
   'pdf-merge': ['PDF 拼接', '合并 PDF', '拼 PDF'],
@@ -310,6 +388,7 @@ const quickTools = computed(() => {
 })
 const recentToolDefinitions = computed(() => recentTools.value.map((id) => toolRegistry.get(id)).filter(Boolean))
 const commandDefinitions = computed(() => [
+  ...(canGoBack.value ? [{ id: 'go-back', label: '返回上一步', description: '恢复上一个模块、工具或效率助手页签', icon: ArrowLeft, keywords: ['返回', '后退', 'back'] }] : []),
   { id: 'toggle-sidebar', label: sidebarCollapsed.value ? '展开侧栏' : '折叠侧栏', description: '在 234px 导航与 64px 图标轨之间切换', icon: sidebarCollapsed.value ? PanelLeftOpen : PanelLeftClose, keywords: ['sidebar', '导航', '图标轨'] },
   { id: 'toggle-task-panel', label: taskPanelPinned.value ? '取消固定任务中心' : '固定任务中心', description: '将任务中心作为右侧第三栏显示', icon: taskPanelPinned.value ? PinOff : Pin, keywords: ['任务', '第三栏', 'pin'] },
   { id: 'open-task-panel', label: taskPanelOpen.value ? '关闭任务中心' : '打开任务中心', description: '查看运行中与最近完成的任务', icon: PanelRight, keywords: ['任务', '工作流'] },
@@ -506,8 +585,63 @@ function revokeOnlineConsent() {
   onlineTaskDisclosures.forEach((_disclosure, taskId) => {
     if (stopJobs.get(taskId)?.()) canceled += 1
   })
+  supabaseSyncManager.cancelPendingRequests()
   const suffix = canceled ? `；已取消 ${canceled} 个联网任务` : ''
   showToast(`联网与模型下载授权已撤回${suffix}；后续请求必须重新确认`, 'info')
+}
+
+function supabaseSyncDisclosure() {
+  return createConsentDisclosure('cloud-sync', {
+    provider: 'Supabase 云同步',
+    providerKey: SUPABASE_CONFIG.url,
+  })
+}
+
+async function submitSupabaseAuth() {
+  if (supabaseAuthBusy.value || !SUPABASE_CONFIG.configured) return
+  const email = supabaseEmail.value.trim()
+  const password = supabasePassword.value
+  if (!email || !password) {
+    showToast('请输入云同步邮箱和密码', 'error')
+    return
+  }
+  supabaseAuthBusy.value = true
+  try {
+    const disclosure = supabaseSyncDisclosure()
+    const result = await runAuthorizedOnlineAction(disclosure, () => supabaseAuthMode.value === 'sign-up'
+      ? supabaseSyncManager.signUp(email, password)
+      : supabaseSyncManager.signIn(email, password))
+    if (!result.started) return
+    supabasePassword.value = ''
+    if (result.value?.confirmationRequired) showToast('注册成功，请查收确认邮件后再登录', 'info')
+    else showToast('云同步已启用，允许的本地状态正在同步')
+  } catch (error) {
+    showToast(error.message || '云同步登录失败', 'error')
+  } finally {
+    supabaseAuthBusy.value = false
+  }
+}
+
+async function syncSupabaseNow() {
+  if (supabaseSyncBusy.value || !supabaseSyncManager.getUser()) return
+  supabaseSyncBusy.value = true
+  try {
+    const result = await runAuthorizedOnlineAction(supabaseSyncDisclosure(), () => supabaseSyncManager.syncNow())
+    if (result.started) showToast(`云同步完成：上传 ${result.value?.uploaded?.length || 0} 类、下载 ${result.value?.downloaded?.length || 0} 类`)
+  } catch (error) {
+    showToast(error.message || '云同步失败', 'error')
+  } finally {
+    supabaseSyncBusy.value = false
+  }
+}
+
+async function signOutSupabase() {
+  try {
+    await supabaseSyncManager.signOut()
+    showToast('已退出云同步；本地数据仍保留', 'info')
+  } catch (error) {
+    showToast(error.message || '退出云同步失败', 'error')
+  }
 }
 
 function persistRelaySettings() {
@@ -876,7 +1010,10 @@ function closeCommandPalette() {
 
 function runCommand(command) {
   if (!command) return
-  if (command.toolId) {
+  if (command.id === 'go-back') {
+    closeCommandPalette()
+    goBack()
+  } else if (command.toolId) {
     useToolById(command.toolId)
   } else if (command.id === 'toggle-sidebar') {
     toggleSidebar()
@@ -936,10 +1073,11 @@ function selectModule(id) {
     if (first) {
       const nextToolId = id === 'docs' && docBusy.value ? docMode.value : first.id
       activeTool.value = nextToolId
-      if (id === 'docs' && !docBusy.value) openDocMode(nextToolId)
+      if (id === 'docs' && !docBusy.value) openDocMode(nextToolId, { recordHistory: false })
       if (id === 'assistant') assistantActiveTab.value = assistantToolTabs[first.id] || 'overview'
     }
   }
+  commitNavigationState()
 }
 
 function selectTool(tool) {
@@ -951,23 +1089,27 @@ function selectTool(tool) {
   activeTool.value = tool.id
   if (tool.module === 'assistant') assistantActiveTab.value = assistantToolTabs[tool.id] || 'overview'
   boundaryBarDismissed.value = false
-  if (tool.module === 'docs') openDocMode(tool.id)
+  if (tool.module === 'docs') openDocMode(tool.id, { recordHistory: false })
   searchFocused.value = false
   searchActiveIndex.value = -1
   mobileNavOpen.value = false
   recentTools.value = [tool.id, ...recentTools.value.filter((id) => id !== tool.id)].slice(0, 6)
   saveState('recent-tools', recentTools.value)
   persistUiPrefs()
+  commitNavigationState()
 }
 
 // 模块内通过工具卡片切换时同样记录最近使用，但不触发模块跳转与忙碌拦截，
 // 这样首页“快速开始 / 最近使用”在任意入口进入工具后都保持一致。
-function rememberRecentTool(id) {
+function rememberRecentTool(id, { recordHistory = true } = {}) {
   if (!id) return
   activeTool.value = id
-  if (recentTools.value[0] === id) return
-  recentTools.value = [id, ...recentTools.value.filter((item) => item !== id)].slice(0, 6)
-  saveState('recent-tools', recentTools.value)
+  if (recentTools.value[0] !== id) {
+    recentTools.value = [id, ...recentTools.value.filter((item) => item !== id)].slice(0, 6)
+    saveState('recent-tools', recentTools.value)
+  }
+  persistUiPrefs()
+  if (recordHistory) commitNavigationState()
 }
 
 function openSearchResults() {
@@ -1256,12 +1398,22 @@ function useToolById(id) {
   if (tool) selectTool(tool)
 }
 
+function isEditableNavigationTarget(target) {
+  const tagName = typeof target?.tagName === 'string' ? target.tagName.toLowerCase() : ''
+  return ['input', 'textarea', 'select'].includes(tagName) || target?.isContentEditable === true
+}
+
 function handleGlobalKeydown(event) {
   if (onlineConsentRequest.value) {
     if (event.key === 'Escape') {
       event.preventDefault()
       settleOnlineConsent(false)
     }
+    return
+  }
+  if (event.altKey && event.key === 'ArrowLeft' && canGoBack.value && !isEditableNavigationTarget(event.target) && !commandPaletteOpen.value && !settingsOpen.value) {
+    event.preventDefault()
+    goBack()
     return
   }
   if ((event.ctrlKey || event.metaKey) && event.shiftKey && event.key.toLowerCase() === 'p') {
@@ -1291,6 +1443,9 @@ function focusMainContent(event) {
 
 function updateNetworkOnlineStatus() {
   networkOnline.value = typeof navigator === 'undefined' ? null : navigator.onLine
+  if (networkOnline.value && supabaseSyncManager.getUser() && isConsentGranted(onlineConsent.value, supabaseSyncDisclosure())) {
+    void supabaseSyncManager.syncNow().catch(() => {})
+  }
 }
 
 function openDependencyTool(toolId) {
@@ -1317,7 +1472,9 @@ watch(commandQuery, () => {
   commandActiveIndex.value = 0
 })
 
-watch([sidebarCollapsed, uiDensity, taskPanelPinned, activeTool, translationSourceLanguage, translationTargetLanguage, translationStyle, translationPreserveFormatting], persistUiPrefs)
+watch([sidebarCollapsed, uiDensity, taskPanelPinned, activeTool, translationSourceLanguage, translationTargetLanguage, translationStyle, translationPreserveFormatting], () => {
+  if (!applyingSupabaseRemoteState) persistUiPrefs()
+})
 
 onMounted(() => {
   document.documentElement.dataset.theme = theme.value
@@ -1326,6 +1483,7 @@ onMounted(() => {
   saveState('recent-tools', recentTools.value)
   saveState('online-consent', onlineConsent.value)
   persistUiPrefs()
+  void supabaseSyncManager.start()
   window.addEventListener('keydown', handleGlobalKeydown)
   window.addEventListener('online', updateNetworkOnlineStatus)
   window.addEventListener('offline', updateNetworkOnlineStatus)
@@ -1352,6 +1510,7 @@ onBeforeUnmount(() => {
   if (barcodePreview.value) URL.revokeObjectURL(barcodePreview.value)
   if (taskHistoryUndoTimer) window.clearTimeout(taskHistoryUndoTimer)
   commandPaletteReturnFocus = null
+  supabaseSyncManager.stop()
 })
 
 // Document tools
@@ -1386,6 +1545,99 @@ const docModes = {
   ocr: { title: 'OCR 文字识别', description: '图片内容不上传；首次使用需联网下载并缓存 OCR 语言模型。', action: '开始识别' },
 }
 const currentDocMode = computed(() => docModes[docMode.value] || docModes['pdf-merge'])
+const navigationHistory = createNavigationHistory({
+  module: activeModule.value,
+  tool: activeTool.value,
+  assistantTab: assistantActiveTab.value,
+  docMode: docMode.value,
+})
+const canGoBack = ref(navigationHistory.canGoBack())
+let restoringNavigation = false
+
+const assistantNavigationLabels = {
+  overview: '效率总览',
+  todos: '待办清单',
+  focus: '番茄钟',
+  reminders: '日历提醒',
+  notes: '快捷便签',
+  toolbox: '办公工具箱',
+  meeting: '会议纪要',
+  templates: '模板库',
+  translation: '翻译助手',
+  ai: 'AI 助手',
+}
+
+function currentNavigationSnapshot() {
+  return normalizeNavigationSnapshot({
+    module: activeModule.value,
+    tool: activeTool.value,
+    assistantTab: assistantActiveTab.value,
+    docMode: docMode.value,
+  })
+}
+
+function syncNavigationState() {
+  canGoBack.value = navigationHistory.canGoBack()
+}
+
+function commitNavigationState() {
+  if (restoringNavigation) return
+  navigationHistory.commit(currentNavigationSnapshot())
+  syncNavigationState()
+}
+
+function navigationLabel(snapshot) {
+  const normalized = normalizeNavigationSnapshot(snapshot)
+  if (normalized.module === 'home') return '首页'
+  const module = modules.find((item) => item.id === normalized.module)
+  if (normalized.module === 'assistant') return `效率助手 · ${assistantNavigationLabels[normalized.assistantTab] || '效率总览'}`
+  const tool = toolRegistry.get(normalized.tool)
+  return tool ? `${module?.label || '工作区'} · ${tool.label}` : (module?.label || '工作区')
+}
+
+function restoreNavigationState(snapshot) {
+  const normalized = normalizeNavigationSnapshot(snapshot)
+  restoringNavigation = true
+  try {
+    activeModule.value = normalized.module
+    mobileNavOpen.value = false
+    searchFocused.value = false
+    searchActiveIndex.value = -1
+    boundaryBarDismissed.value = false
+    if (normalized.module === 'docs') {
+      const mode = docModes[normalized.docMode] ? normalized.docMode : (docModes[normalized.tool] ? normalized.tool : 'pdf-merge')
+      activeTool.value = mode
+      if (docMode.value !== mode) openDocMode(mode, { recordHistory: false })
+    } else {
+      if (normalized.tool) activeTool.value = normalized.tool
+      if (normalized.module === 'assistant') assistantActiveTab.value = normalized.assistantTab || 'overview'
+    }
+  } finally {
+    restoringNavigation = false
+  }
+  syncNavigationState()
+  persistUiPrefs()
+  void nextTick(() => document.querySelector('#main-content')?.focus({ preventScroll: true }))
+}
+
+function goBack() {
+  if (!canGoBack.value) return
+  const target = navigationHistory.peekBack()
+  if (!target) return
+  if (docBusy.value && target.module === 'docs' && target.docMode && target.docMode !== docMode.value) {
+    showToast('请等待当前文档任务完成，或先在任务中心取消', 'info')
+    return
+  }
+  const previous = navigationHistory.back()
+  if (!previous) return
+  restoreNavigationState(previous)
+  announce(`已返回：${navigationLabel(previous)}`)
+}
+
+watch(assistantActiveTab, () => {
+  if (activeModule.value === 'assistant' && !restoringNavigation) commitNavigationState()
+}, { flush: 'sync' })
+
 const docInputAccept = computed(() => {
   if (docMode.value.startsWith('pdf-')) return '.pdf,application/pdf'
   if (docMode.value === 'archive' && archiveMode.value === 'extract') return '.zip,application/zip'
@@ -1418,7 +1670,7 @@ const docPreflightSummary = computed(() => {
   return `执行前汇总：${inputSummary}，按当前列表顺序处理；${outputSummary}`
 })
 
-function openDocMode(mode) {
+function openDocMode(mode, { recordHistory = true } = {}) {
   if (!docModes[mode]) return
   if (docBusy.value && mode !== docMode.value) {
     showToast('请等待当前文档任务完成，或先在任务中心取消', 'info')
@@ -1432,8 +1684,9 @@ function openDocMode(mode) {
     docSelectionFeedback.value = ''
   }
   docMode.value = mode
-  rememberRecentTool(mode)
+  rememberRecentTool(mode, { recordHistory: false })
   docResult.value = null
+  if (recordHistory) commitNavigationState()
 }
 
 function setArchiveMode(mode) {
@@ -2615,6 +2868,7 @@ const statusLabel = computed(() => {
 
     <div class="app-content" :aria-hidden="onlineConsentRequest ? 'true' : undefined" :inert="onlineConsentRequest ? '' : undefined">
       <header class="topbar">
+        <button class="icon-button history-back-button" type="button" :disabled="!canGoBack" aria-label="返回上一步" :title="canGoBack ? '返回上一步 · Alt ←' : '暂无可返回记录'" @click="goBack"><ArrowLeft :size="18" /></button>
         <button class="icon-button mobile-menu" type="button" aria-label="打开导航" @click="mobileNavOpen = true"><Menu :size="20" /></button>
         <div class="search-wrap" :class="{ focused: searchFocused }">
           <Search :size="18" aria-hidden="true" />
@@ -2971,12 +3225,9 @@ const statusLabel = computed(() => {
             </section>
           </div>
 
-          <div v-else-if="activeModule === 'power'" class="workspace-grid power-page">
-            <ShutdownWorkspace :runtime-mode="runtimeMode" @notify="showToast" />
-          </div>
+          <PowerModuleWorkspace v-else-if="activeModule === 'power'" :runtime-mode="runtimeMode" @notify="showToast" />
 
-          <div v-else-if="activeModule === 'assistant'" class="assistant-page">
-            <AssistantWorkspace v-model:active-tab="assistantActiveTab" :network-online="networkOnline !== false" @open-tool="useToolById" @notify="showToast">
+          <AssistantModuleWorkspace v-else-if="activeModule === 'assistant'" v-model:active-tab="assistantActiveTab" :network-online="networkOnline !== false" @open-tool="useToolById" @notify="showToast">
               <template #translation="{ saveNote }">
                 <section class="content-card assistant-card translation-card" aria-labelledby="translation-assistant-title">
                   <div class="card-heading">
@@ -3017,8 +3268,7 @@ const statusLabel = computed(() => {
                   <div v-if="relayResult" class="relay-output" role="status"><div><strong>{{ relayResult.model }}</strong><small>{{ relayResult.provider }}<template v-if="relayResult.usage?.total_tokens"> · {{ relayResult.usage.total_tokens }} tokens</template></small></div><p>{{ relayResult.content }}</p><button class="outline-button" type="button" @click="copyText(relayResult.content, '中转站结果已复制')"><Copy :size="15" /> 复制结果</button></div>
                 </section>
               </template>
-            </AssistantWorkspace>
-          </div>
+          </AssistantModuleWorkspace>
 
         </section>
       </main>
@@ -3171,6 +3421,30 @@ const statusLabel = computed(() => {
                   <div class="setting-row"><span><strong>可选插件</strong><small>OCR 模型按需缓存；AI 图片能力暂未加载</small></span><span class="setting-fixed"><LockKeyhole :size="16" /> 按需加载</span></div>
                   <div class="setting-row"><span><strong>更新通道</strong><small>当前 NSIS 安装器未签名，自动更新源未配置</small></span><button class="outline-button" type="button" @click="showUpdateStatus"><RefreshCw :size="15" /> 检查状态</button></div>
                 </div>
+                <section class="cloud-sync-panel" aria-labelledby="cloud-sync-title">
+                  <div class="cloud-sync-heading">
+                    <div><strong id="cloud-sync-title">Supabase 云同步</strong><small>默认同步效率助手、任务历史和界面偏好；本地仍是主数据源</small></div>
+                    <span class="dependency-state" :class="supabaseSyncStatus.phase === 'synced' ? 'ready' : supabaseSyncStatus.phase === 'error' ? 'attention' : 'informational'">{{ supabaseSyncStatus.message }}</span>
+                  </div>
+                  <p class="cloud-sync-note">项目地址：{{ SUPABASE_CONFIG.url }}。只发送白名单状态；便签正文、会议正文、文件、API Key、诊断日志不会上传。未配置或断网时不影响本地使用。</p>
+                  <div v-if="!SUPABASE_CONFIG.configured" class="dependency-panel missing">
+                    <strong>尚未配置云同步</strong>
+                    <span>复制 <code>.env.example</code> 为 <code>.env.local</code>，填写 <code>VITE_SUPABASE_PUBLISHABLE_KEY</code> 后重启开发服务。密钥只保存在本机环境，不写入仓库。</span>
+                  </div>
+                  <form v-else-if="!supabaseSyncStatus.user" class="cloud-sync-auth" @submit.prevent="submitSupabaseAuth">
+                    <div class="form-grid">
+                      <label>邮箱<input v-model="supabaseEmail" class="form-control" type="email" autocomplete="email" required placeholder="you@example.com" /></label>
+                      <label>密码<input v-model="supabasePassword" class="form-control" type="password" autocomplete="current-password" minlength="6" maxlength="256" required placeholder="至少 6 个字符" /></label>
+                    </div>
+                    <div class="diagnostic-actions"><button class="primary-button" type="submit" :disabled="supabaseAuthBusy"><Network :size="15" /> {{ supabaseAuthBusy ? '验证中...' : supabaseAuthMode === 'sign-up' ? '注册并启用同步' : '登录并启用同步' }}</button><button class="outline-button" type="button" :disabled="supabaseAuthBusy" @click="supabaseAuthMode = supabaseAuthMode === 'sign-up' ? 'sign-in' : 'sign-up'">{{ supabaseAuthMode === 'sign-up' ? '已有账号，改为登录' : '首次使用，注册账号' }}</button></div>
+                  </form>
+                  <div v-else class="cloud-sync-account">
+                    <div class="cloud-sync-user"><span><strong>{{ supabaseSyncStatus.user.email || '已登录账号' }}</strong><small>同步范围：{{ SUPABASE_SYNC_NAMESPACES.join('、') }}</small></span><span class="setting-fixed"><CheckCircle2 :size="15" /> 已登录</span></div>
+                    <div class="diagnostic-actions"><button class="primary-button" type="button" :disabled="supabaseSyncBusy || supabaseSyncStatus.phase === 'syncing'" @click="syncSupabaseNow"><RefreshCw :size="15" /> {{ supabaseSyncBusy || supabaseSyncStatus.phase === 'syncing' ? '同步中...' : '立即同步' }}</button><button class="outline-button" type="button" @click="signOutSupabase"><X :size="15" /> 退出账号</button></div>
+                    <p v-if="supabaseSyncStatus.lastSyncedAt" class="cloud-sync-last">上次同步：{{ new Date(supabaseSyncStatus.lastSyncedAt).toLocaleString('zh-CN') }}</p>
+                    <p v-if="supabaseSyncStatus.error" class="relay-status error" role="alert">{{ supabaseSyncStatus.error }}</p>
+                  </div>
+                </section>
                 <section class="diagnostic-panel" aria-labelledby="diagnostic-title">
                   <div class="diagnostic-heading"><div><strong id="diagnostic-title">隐私诊断包</strong><small>先预览字段，再由你决定是否下载</small></div><ShieldCheck :size="17" /></div>
                   <div class="diagnostic-actions">

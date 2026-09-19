@@ -2,6 +2,7 @@
 param(
     [string]$ExePath,
     [string]$InstallerPath,
+    [string]$PortableExePath,
     [string]$InstallerScriptPath,
     [string]$ReleaseBaselinePath,
     [string]$IdleBaselinePath,
@@ -119,6 +120,8 @@ if (-not $OutputPath) { $OutputPath = Join-Path $projectRoot 'output\performance
 
 $exe = Resolve-ExistingFile $ExePath 'Release EXE'
 $installer = Resolve-ExistingFile $InstallerPath 'NSIS installer'
+$portableExe = $null
+if ($PortableExePath) { $portableExe = Resolve-ExistingFile $PortableExePath 'Portable EXE' }
 $installerScript = Resolve-ExistingFile $InstallerScriptPath 'NSIS script'
 $releasePath = Resolve-ExistingFile $ReleaseBaselinePath 'Release baseline'
 $idlePath = Resolve-ExistingFile $IdleBaselinePath 'Idle baseline'
@@ -162,8 +165,16 @@ $exeHash = (Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash.ToUpperInvari
 $installerHash = (Get-FileHash -LiteralPath $installer -Algorithm SHA256).Hash.ToUpperInvariant()
 $manifestExe = Get-ManifestArtifact $manifest $exeRelativePath
 $manifestInstaller = Get-ManifestArtifact $manifest $installerRelativePath
+$manifestPortable = $null
+$portableHash = $null
+if ($portableExe) {
+    $portableRelativePath = Get-RelativeProjectPath $portableExe
+    $portableHash = (Get-FileHash -LiteralPath $portableExe -Algorithm SHA256).Hash.ToUpperInvariant()
+    $manifestPortable = Get-ManifestArtifact $manifest $portableRelativePath
+}
 $hashReady = $null -ne $manifestExe -and $null -ne $manifestInstaller -and $manifestExe.sha256 -eq $exeHash -and $manifestInstaller.sha256 -eq $installerHash
-Add-Check $checks 'artifact-hashes' $hashReady ("exe={0}, installer={1}" -f $exeHash, $installerHash)
+$portableHashReady = -not $portableExe -or ($null -ne $manifestPortable -and $manifestPortable.sha256 -eq $portableHash)
+Add-Check $checks 'artifact-hashes' ($hashReady -and $portableHashReady) ("exe={0}, installer={1}, portable={2}" -f $exeHash, $installerHash, $(if ($portableHash) { $portableHash } else { 'not-configured' }))
 
 foreach ($baselineCheck in @(
     [pscustomobject]@{ name = 'release-baseline-artifact'; baseline = $release },
@@ -177,8 +188,9 @@ foreach ($baselineCheck in @(
 
 $exeSignature = Get-ArtifactSignature $exe
 $installerSignature = Get-ArtifactSignature $installer
-$artifactSignaturesReady = $exeSignature -eq 'Valid' -and $installerSignature -eq 'Valid'
-Add-Check $checks 'authenticode-signatures' $artifactSignaturesReady ("exe={0}, installer={1}" -f $exeSignature, $installerSignature)
+$portableSignature = if ($portableExe) { Get-ArtifactSignature $portableExe } else { 'not-configured' }
+$artifactSignaturesReady = $exeSignature -eq 'Valid' -and $installerSignature -eq 'Valid' -and (-not $portableExe -or $portableSignature -eq 'Valid')
+Add-Check $checks 'authenticode-signatures' $artifactSignaturesReady ("exe={0}, installer={1}, portable={2}" -f $exeSignature, $installerSignature, $portableSignature)
 $manifestSigning = $manifest.signing
 $detachedSignature = Test-DetachedUpdateSignature $manifestPath $UpdateSignaturePath $UpdatePublicKeyPath
 $manifestSigningReady = $null -ne $manifestSigning -and [bool]$manifestSigning.releaseQualified -and $manifestSigning.packageSignatureStatus -eq 'Valid' -and $manifestSigning.updateManifestSignatureStatus -eq 'valid' -and $detachedSignature.passed
@@ -213,6 +225,7 @@ $report = [ordered]@{
     inputs = [ordered]@{
         exe = Get-RelativeProjectPath $exe
         installer = Get-RelativeProjectPath $installer
+        portableExe = if ($portableExe) { Get-RelativeProjectPath $portableExe } else { $null }
         installerScript = Get-RelativeProjectPath $installerScript
         releaseBaseline = Get-RelativeProjectPath $releasePath
         idleBaseline = Get-RelativeProjectPath $idlePath

@@ -12,9 +12,15 @@ tmp/
 output/playwright/
 output/validation/
 output/performance/
+output/portable/
 
 # OCR model downloads are fetched on demand by the application.
 *.traineddata
+
+# Local Supabase/API configuration
+.env
+.env.*
+!.env.example
 
 # Python bytecode caches
 __pycache__/

@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import {
   ArrowDown,
   ArrowRight,
@@ -62,7 +62,6 @@ import {
   formatDuration,
   isTodoOverdue,
   localDateTimeValue,
-  nextReminderOccurrence,
   normalizeAssistantReminders,
   normalizeAssistantState,
   normalizeAssistantTodos,
@@ -117,6 +116,7 @@ const meetings = computed({
 let persistTimer
 let noteSaveTimer
 let clockTimer
+let applyingRemoteState = false
 
 function persistAssistant() {
   const snapshot = normalizeAssistantState(assistant.value)
@@ -136,9 +136,21 @@ function queuePersist() {
 }
 
 watch(assistant, () => {
+  if (applyingRemoteState) return
   noteSaveState.value = '正在保存...'
   queuePersist()
 }, { deep: true })
+
+function handleRemoteAssistantState(event) {
+  if (event?.detail?.namespace !== 'assistant') return
+  applyingRemoteState = true
+  clearTimeout(persistTimer)
+  assistant.value = normalizeAssistantState(event.detail.value)
+  noteSaveState.value = '云端状态已更新'
+  void nextTick(() => {
+    applyingRemoteState = false
+  })
+}
 
 const assistantTabDefinitions = [
   { id: 'overview', label: '效率总览', icon: BarChart3, description: '汇总任务、专注与提醒数据' },
@@ -405,6 +417,7 @@ const focusRunning = ref(false)
 const focusCycleCount = ref(0)
 const focusTimer = ref(null)
 const focusInitialSeconds = ref(0)
+const focusEndsAt = ref(0)
 const focusSessionStartedAt = ref(0)
 const focusTodoId = ref('')
 const profileDraft = ref({ name: '', workMinutes: 25, shortBreakMinutes: 5, longBreakMinutes: 15, longBreakEvery: 4 })
@@ -432,6 +445,7 @@ function resetFocusTimer() {
   focusMode.value = 'work'
   focusSeconds.value = focusDurationFor('work')
   focusInitialSeconds.value = focusSeconds.value
+  focusEndsAt.value = 0
   focusSessionStartedAt.value = 0
 }
 
@@ -498,6 +512,7 @@ function toggleWhiteNoise() {
 function finishFocusCycle() {
   const completedMode = focusMode.value
   const duration = focusInitialSeconds.value
+  focusEndsAt.value = 0
   recordFocusSession(duration, true)
   if (completedMode === 'work') focusCycleCount.value += 1
   if (!focus.value.settings.autoCycle) {
@@ -513,6 +528,7 @@ function finishFocusCycle() {
   focusMode.value = nextMode
   focusSeconds.value = focusDurationFor(nextMode)
   focusInitialSeconds.value = focusSeconds.value
+  focusEndsAt.value = Date.now() + focusSeconds.value * 1_000
   focusSessionStartedAt.value = nextMode === 'work' ? Date.now() : 0
   notify(`${completedMode === 'work' ? '专注' : '休息'}完成，开始${nextMode === 'work' ? '专注' : nextMode === 'short' ? '短休息' : '长休息'}`)
 }
@@ -522,23 +538,30 @@ function startFocus() {
   focusRunning.value = true
   if (!focusSeconds.value) focusSeconds.value = focusDurationFor(focusMode.value)
   focusInitialSeconds.value = focusSeconds.value
+  focusEndsAt.value = Date.now() + focusSeconds.value * 1_000
   focusSessionStartedAt.value = focusMode.value === 'work' ? Date.now() : 0
   if (focus.value.settings.whiteNoise) startWhiteNoise()
   focusTimer.value = window.setInterval(() => {
-    if (focusSeconds.value <= 1) {
+    const remaining = Math.max(0, Math.ceil((focusEndsAt.value - Date.now()) / 1_000))
+    if (remaining <= 0) {
       focusSeconds.value = 0
       finishFocusCycle()
       return
     }
-    focusSeconds.value -= 1
+    focusSeconds.value = remaining
   }, 1_000)
 }
 
 function stopFocus({ recordPartial = true } = {}) {
   if (!focusRunning.value) return
-  const elapsed = focusInitialSeconds.value - focusSeconds.value
+  const currentSeconds = focusEndsAt.value
+    ? Math.max(0, Math.ceil((focusEndsAt.value - Date.now()) / 1_000))
+    : focusSeconds.value
+  focusSeconds.value = currentSeconds
+  const elapsed = focusInitialSeconds.value - currentSeconds
   if (recordPartial && elapsed >= 30) recordFocusSession(elapsed, false)
   focusRunning.value = false
+  focusEndsAt.value = 0
   if (focusTimer.value) window.clearInterval(focusTimer.value)
   focusTimer.value = null
   stopWhiteNoise()
@@ -719,28 +742,15 @@ function dropReminder(reminder) {
   reminders.value = next.map((item, index) => ({ ...item, order: index }))
 }
 
-function checkReminders() {
-  const now = Date.now()
-  let changed = false
-  reminders.value.forEach((reminder) => {
-    const timestamp = new Date(reminder.at).getTime()
-    const triggerAt = timestamp - Number(reminder.advanceMinutes || 0) * 60_000
-    if (reminder.notified || !Number.isFinite(timestamp) || now < triggerAt) return
-    changed = true
-    reminder.lastNotifiedAt = now
-    const next = nextReminderOccurrence(reminder, now)
-    if (next) {
-      reminder.at = localDateTimeValue(next)
-      reminder.notified = false
-    } else {
-      reminder.notified = true
-    }
-    notify(`提醒：${reminder.title}`, 'info')
-    if ('Notification' in window && Notification.permission === 'granted') {
-      new Notification('效率百宝箱提醒', { body: reminder.title })
-    }
-  })
-  if (changed) queuePersist()
+function handleReminderSchedulerEvent(event) {
+  const detail = event?.detail || {}
+  if (detail.type === 'fallback') {
+    if (detail.reminder?.title) notify(`提醒：${detail.reminder.title}`, 'info')
+    return
+  }
+  if (detail.type !== 'state' || !Array.isArray(detail.reminders)) return
+  reminders.value = normalizeAssistantReminders(detail.reminders)
+  queuePersist()
 }
 
 // Notes
@@ -1105,24 +1115,26 @@ function handleAssistantKeydown(event) {
 
 onMounted(() => {
   persistAssistant()
-  checkReminders()
   clockTimer = window.setInterval(() => {
     assistantNow.value = Date.now()
-    checkReminders()
   }, 15_000)
   window.addEventListener('keydown', handleAssistantKeydown)
+  window.addEventListener('efficiency:reminder', handleReminderSchedulerEvent)
+  window.addEventListener('efficiency-state-remote', handleRemoteAssistantState)
   resetFocusTimer()
 })
 
 onBeforeUnmount(() => {
   window.removeEventListener('keydown', handleAssistantKeydown)
+  window.removeEventListener('efficiency:reminder', handleReminderSchedulerEvent)
+  window.removeEventListener('efficiency-state-remote', handleRemoteAssistantState)
   window.clearInterval(clockTimer)
   window.clearInterval(toolboxTimer)
   if (focusTimer.value) window.clearInterval(focusTimer.value)
   clearTimeout(persistTimer)
   clearTimeout(noteSaveTimer)
   stopWhiteNoise()
-  persistAssistant()
+  if (!applyingRemoteState) persistAssistant()
 })
 </script>
 

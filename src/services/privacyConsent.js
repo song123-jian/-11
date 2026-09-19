@@ -11,6 +11,7 @@ export const consentScopes = Object.freeze({
   'relay-test': '中转站连接测试',
   relay: '中转站 AI 内容发送',
   translation: '翻译助手内容发送',
+  'cloud-sync': '云同步状态',
 })
 
 const disclosureDefaults = Object.freeze({
@@ -67,6 +68,12 @@ const disclosureDefaults = Object.freeze({
     providerKey: '',
     data: 'API Key、模型名、源语言、目标语言、翻译风格和你输入的文本',
     purpose: '调用已配置的 AI 模型生成翻译结果',
+  }),
+  'cloud-sync': Object.freeze({
+    provider: 'Supabase 云同步',
+    providerKey: '',
+    data: '待办、任务状态和界面偏好；便签/会议正文、文件、API Key 与诊断日志不会上传',
+    purpose: '在你自己的 Supabase 账号与设备之间同步允许的本地状态',
   }),
 })
 

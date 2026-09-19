@@ -126,6 +126,7 @@ kbd { border: 1px solid var(--border); border-radius: 4px; padding: 2px 6px; col
 .avatar-button { width: 32px; height: 32px; border-radius: 50%; background: var(--navy); color: #fff; font-weight: 600; }
 .icon-button { width: 32px; height: 32px; flex: 0 0 32px; border: 1px solid transparent; border-radius: 6px; display: inline-grid; place-items: center; background: transparent; color: var(--muted); cursor: pointer; }
 .icon-button.mobile-close { display: none; }
+.history-back-button:disabled { cursor: not-allowed; opacity: .42; }
 .icon-button:hover { color: var(--ink); background: var(--surface-strong); }
 
 .main-content { flex: 1; padding: 38px 42px 62px; }
@@ -669,6 +670,20 @@ kbd { border: 1px solid var(--border); border-radius: 4px; padding: 2px 6px; col
 .dependency-state.ready { color: var(--green); }
 .dependency-state.attention { color: var(--amber); }
 .dependency-state.informational { color: var(--teal); }
+.cloud-sync-panel { margin-top: 18px; padding: 15px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface-muted); }
+.cloud-sync-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; }
+.cloud-sync-heading > div { min-width: 0; display: grid; gap: 3px; }
+.cloud-sync-heading strong { color: var(--ink); font-size: 13px; }
+.cloud-sync-heading small, .cloud-sync-note, .cloud-sync-last { color: var(--muted); font-size: 11px; line-height: 1.5; }
+.cloud-sync-note { margin: 11px 0 0; overflow-wrap: anywhere; }
+.cloud-sync-note code, .cloud-sync-panel code { padding: 1px 4px; border: 1px solid var(--border); border-radius: 3px; background: var(--surface); color: var(--ink); font: 10px/1.4 Consolas, monospace; }
+.cloud-sync-auth, .cloud-sync-account { display: grid; gap: 12px; margin-top: 13px; padding-top: 13px; border-top: 1px solid var(--border); }
+.cloud-sync-auth .form-grid { margin-top: 0; }
+.cloud-sync-user { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.cloud-sync-user > span:first-child { min-width: 0; display: grid; gap: 3px; }
+.cloud-sync-user strong { overflow-wrap: anywhere; color: var(--ink); font-size: 12px; }
+.cloud-sync-user small { color: var(--muted); font-size: 11px; }
+.cloud-sync-last { margin: 0; }
 .relay-settings .form-grid { margin-top: 13px; }
 .relay-status { margin: 10px 0 0; font-size: 11px; line-height: 1.45; }
 .relay-status.success { color: var(--green); }

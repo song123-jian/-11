@@ -58,6 +58,9 @@ export function saveState(key, value) {
       }
     }
     window.localStorage.setItem(storageKey, JSON.stringify(envelope(value)))
+    if (typeof window.dispatchEvent === 'function' && typeof window.CustomEvent === 'function') {
+      window.dispatchEvent(new window.CustomEvent('efficiency-state-change', { detail: { key: normalizedKey } }))
+    }
     return true
   } catch {
     // Storage can be unavailable in private or embedded browser contexts.
@@ -70,6 +73,9 @@ export function removeState(key) {
     const normalizedKey = allowedKey(key)
     if (!normalizedKey) return false
     window.localStorage.removeItem(prefix + normalizedKey)
+    if (typeof window.dispatchEvent === 'function' && typeof window.CustomEvent === 'function') {
+      window.dispatchEvent(new window.CustomEvent('efficiency-state-change', { detail: { key: normalizedKey, removed: true } }))
+    }
     return true
   } catch {
     // Ignore storage failures; the UI remains usable for the current session.
