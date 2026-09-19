@@ -21,6 +21,12 @@ import {
   normalizeEditorRect,
   wrapCanvasText,
 } from '../src/services/imageEditorTools.js'
+import {
+  calculateImageMeasurement,
+  formatAspectRatio,
+  formatMeasurementValue,
+  normalizeMeasurementDpi,
+} from '../src/services/imageMeasureTools.js'
 
 test('ID photo reference data exposes common sizes and bounded custom sizes', () => {
   assert.equal(ID_PHOTO_SPECS.length >= 5, true)
@@ -94,4 +100,29 @@ test('image editor geometry clamps points, selections, and large images', () => 
   assert.deepEqual(fitEditorDimensions(4800, 2400, 1600), { width: 1600, height: 800, scale: 1 / 3 })
   const context = { measureText: (value) => ({ width: value.length * 10 }) }
   assert.deepEqual(wrapCanvasText(context, '一二三四五', 25), ['一二', '三四', '五'])
+})
+
+test('image measurement validates DPI and converts pixels to physical units', () => {
+  assert.equal(normalizeMeasurementDpi(300), 300)
+  assert.throws(() => normalizeMeasurementDpi(0), /1-2400/)
+  assert.throws(() => normalizeMeasurementDpi(2401), /1-2400/)
+  assert.equal(formatAspectRatio(600, 400), '3:2')
+  assert.throws(() => formatAspectRatio(0, 400), /图片宽度必须是大于 0/)
+
+  const measurement = calculateImageMeasurement({ width: 600, height: 400, fileSize: 1536, dpi: 300, unit: 'mm' })
+  assert.equal(measurement.widthPx, 600)
+  assert.equal(measurement.heightPx, 400)
+  assert.equal(measurement.aspectRatio, '3:2')
+  assert.equal(measurement.fileSizeBytes, 1536)
+  assert.equal(measurement.fileSizeKb, 1.5)
+  assert.equal(Number(measurement.physicalWidth.toFixed(2)), 50.8)
+  assert.equal(Number(measurement.physicalHeight.toFixed(2)), 33.87)
+
+  const inches = calculateImageMeasurement({ width: 300, height: 150, dpi: 300, unit: 'in' })
+  assert.equal(inches.physicalWidth, 1)
+  assert.equal(inches.physicalHeight, 0.5)
+  const centimeters = calculateImageMeasurement({ width: 300, height: 150, dpi: 300, unit: 'cm' })
+  assert.equal(centimeters.physicalWidth, 2.54)
+  assert.equal(centimeters.physicalHeight, 1.27)
+  assert.equal(formatMeasurementValue(1234.567, 1), '1,234.6')
 })

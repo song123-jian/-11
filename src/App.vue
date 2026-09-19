@@ -46,6 +46,7 @@ import {
   QrCode,
   RefreshCw,
   RotateCcw,
+  Ruler,
   Search,
   Settings,
   ShieldCheck,
@@ -61,6 +62,7 @@ import {
 import { loadState, saveState } from './services/storage'
 import { createJob } from './services/jobQueue'
 import { downloadBlob, processImage, processImageToTarget } from './services/imageTools'
+import { calculateImageMeasurement, formatMeasurementValue, MEASUREMENT_UNITS_LIST } from './services/imageMeasureTools'
 import { readQr, renderQr } from './services/qr'
 import { BARCODE_FORMATS, renderBarcode } from './services/barcodeTools'
 import { mergePdfs, splitPdf } from './services/pdfTools'
@@ -117,6 +119,7 @@ const tools = [
   { id: 'pdf-split', module: 'docs', label: 'PDF 拆分', icon: FileText, level: 'P0', description: '按页码拆分为独立文件' },
   { id: 'rename', module: 'docs', label: '批量重命名', icon: WandSparkles, level: 'P0', description: '预览冲突后批量改名' },
   { id: 'image-compress', module: 'image', label: '图片压缩', icon: FileImage, level: 'P0', description: '本地压缩并下载结果' },
+  { id: 'image-measure', module: 'image', label: '尺寸测量', icon: Ruler, description: '测量图片像素、比例与物理尺寸' },
   { id: 'qr', module: 'network', label: '二维码生成 / 识别', icon: QrCode, level: 'P0', description: '生成二维码或读取图片' },
   { id: 'barcode', module: 'network', label: '条形码生成', icon: Barcode, description: '本地生成 Code 128 或 EAN-13' },
   { id: 'unit', module: 'data', label: '单位换算', icon: RefreshCw, level: 'P0', description: '长度、重量与温度换算' },
@@ -162,7 +165,7 @@ const imageTools = tools.filter((tool) => tool.module === 'image')
 const docToolIds = ['pdf-merge', 'pdf-split', 'rename', 'archive', 'office-pdf', 'print', 'templates', 'ocr']
 const dataToolIds = ['unit', 'date', 'percentage', 'calculator', 'table-data', 'exchange', 'mortgage', 'tax', 'bmi']
 const networkToolIds = ['qr', 'barcode', 'speed', 'ip', 'ping', 'port']
-const imageToolIds = ['image-compress', 'screenshot', 'long-screenshot', 'watermark', 'stitch', 'image-ai', 'id-photo', 'image-text-edit']
+const imageToolIds = ['image-compress', 'image-measure', 'screenshot', 'long-screenshot', 'watermark', 'stitch', 'image-ai', 'id-photo', 'image-text-edit']
 const securityToolIds = ['password', 'password-strength', 'crypto', 'redact']
 const advancedImageToolIds = new Set(['image-ai', 'id-photo', 'image-text-edit'])
 const onlineBoundaryToolIds = new Set(['relay-assistant', 'exchange', 'speed', 'ip', 'ping', 'port'])
@@ -326,6 +329,7 @@ const toolSearchAliases = {
   'pdf-split': ['PDF 分页', '拆分 PDF', '提取页面'],
   rename: ['文件改名', '文件重命名', '批量改名'],
   'image-compress': ['压缩图片', '图片瘦身', 'JPG 压缩'],
+  'image-measure': ['图片尺寸', '像素尺寸', '分辨率', 'DPI', '长宽', '宽高', '物理尺寸'],
   qr: ['二维码', 'QR', '条码'],
   barcode: ['条形码', '一维码', 'Code 128', 'EAN-13', '商品条码'],
   unit: ['换算', '长度', '重量', '温度'],
@@ -1506,6 +1510,7 @@ onBeforeUnmount(() => {
   onlineConsentResolver?.(false)
   onlineConsentResolver = null
   if (imagePreview.value) URL.revokeObjectURL(imagePreview.value)
+  if (measurePreview.value) URL.revokeObjectURL(measurePreview.value)
   if (imageBatchPreview.value) URL.revokeObjectURL(imageBatchPreview.value)
   if (barcodePreview.value) URL.revokeObjectURL(barcodePreview.value)
   if (taskHistoryUndoTimer) window.clearTimeout(taskHistoryUndoTimer)
@@ -2395,6 +2400,26 @@ const imageTargetEnabled = ref(false)
 const imageTargetKb = ref(300)
 const imageResult = ref(null)
 const imageBusy = ref(false)
+const measureFile = ref(null)
+const measurePreview = ref('')
+const measureDimensions = ref(null)
+const measureDpi = ref(96)
+const measureUnit = ref('mm')
+const measureBusy = ref(false)
+const measureError = ref('')
+let measureLoadId = 0
+const measureCalculation = computed(() => {
+  if (!measureDimensions.value) return null
+  try {
+    return calculateImageMeasurement({
+      ...measureDimensions.value,
+      dpi: measureDpi.value,
+      unit: measureUnit.value,
+    })
+  } catch (error) {
+    return { error: error.message }
+  }
+})
 const imageBatchFiles = ref([])
 const imageBatchBusy = ref(false)
 const imageBatchResult = ref(null)
@@ -2416,6 +2441,45 @@ function chooseImage(event) {
   imageFile.value = file
   imageResult.value = null
   imagePreview.value = URL.createObjectURL(file)
+}
+
+function chooseMeasureImage(event) {
+  const file = event.target.files?.[0]
+  event.target.value = ''
+  if (!file) return
+  if (!file.type.startsWith('image/')) {
+    measureError.value = '请选择 JPG、PNG、WebP 等图片文件'
+    return
+  }
+  if (measurePreview.value) URL.revokeObjectURL(measurePreview.value)
+  measureFile.value = file
+  measurePreview.value = URL.createObjectURL(file)
+  measureDimensions.value = null
+  measureError.value = ''
+  measureBusy.value = true
+  const loadId = ++measureLoadId
+  const image = new Image()
+  image.onload = () => {
+    if (loadId !== measureLoadId) return
+    measureDimensions.value = { width: image.naturalWidth, height: image.naturalHeight, fileSize: file.size }
+    measureBusy.value = false
+  }
+  image.onerror = () => {
+    if (loadId !== measureLoadId) return
+    measureBusy.value = false
+    measureError.value = '图片无法读取，请更换文件后重试'
+  }
+  image.src = measurePreview.value
+}
+
+function clearMeasureImage() {
+  measureLoadId += 1
+  if (measurePreview.value) URL.revokeObjectURL(measurePreview.value)
+  measureFile.value = null
+  measurePreview.value = ''
+  measureDimensions.value = null
+  measureError.value = ''
+  measureBusy.value = false
 }
 
 async function compressImage() {
@@ -3181,6 +3245,29 @@ const statusLabel = computed(() => {
               <template v-else-if="activeTool === 'image-compress'">
                 <div class="tool-title-row"><div><h2>图片压缩与格式转换</h2><p>Canvas 本地处理；原图不上传，结果另存为新文件。</p></div><span class="offline-chip"><LockKeyhole :size="13" /> 本地处理</span></div>
                 <label class="dropzone image-drop" for="image-file"><ImageIcon :size="22" /><strong>{{ imageFile ? imageFile.name : '选择一张图片' }}</strong><span>支持 JPG、PNG、WebP · 处理前预览</span><input id="image-file" type="file" accept="image/*" @change="chooseImage" /></label><div v-if="imagePreview" class="image-workbench"><div class="image-preview"><img :src="imagePreview" alt="待处理图片预览" /></div><div class="image-controls"><label class="check-option image-target-toggle"><input v-model="imageTargetEnabled" type="checkbox" /> 压到指定 KB</label><label v-if="imageTargetEnabled">目标大小（KB）<input v-model="imageTargetKb" class="form-control" type="number" min="10" max="20000" step="1" /><span class="field-hint">系统会自动调整质量与尺寸，尽量不超过目标。</span></label><label v-else>质量 <strong>{{ imageQuality }}%</strong><input v-model="imageQuality" class="form-range" type="range" min="20" max="100" /></label><label>输出格式<select v-model="imageFormat" class="form-control"><option value="image/jpeg">JPG</option><option value="image/png">PNG</option><option value="image/webp">WebP</option></select></label><button class="primary-button" type="button" :disabled="imageBusy" @click="compressImage"><WandSparkles :size="16" /> {{ imageBusy ? '处理中...' : imageTargetEnabled ? '压缩到目标大小' : '开始处理' }}</button><button v-if="imageResult" class="outline-button" type="button" @click="downloadImage"><Download :size="16" /> 下载 {{ imageResult.width }}×{{ imageResult.height }}</button><div v-if="imageResult" class="result-callout"><CheckCircle2 :size="16" /><span>{{ (imageResult.blob.size / 1024).toFixed(0) }} KB · {{ imageResult.withinTarget === false ? `未达到 ${imageResult.targetKb} KB，已尽量压缩` : imageResult.targetKb ? `目标 ${imageResult.targetKb} KB 内` : '已生成结果' }}</span></div></div></div>
+              </template>
+
+              <template v-else-if="activeTool === 'image-measure'">
+                <div class="tool-title-row"><div><h2>图片尺寸测量</h2><p>读取图片原始像素尺寸，并按指定 DPI 换算打印或排版尺寸；文件只在本机处理。</p></div><span class="offline-chip"><Ruler :size="13" /> 本地处理</span></div>
+                <label class="dropzone image-drop" for="measure-image-file"><Ruler :size="22" /><strong>{{ measureFile ? measureFile.name : '选择一张图片' }}</strong><span>支持 JPG、PNG、WebP · 自动读取宽高与文件大小</span><input id="measure-image-file" type="file" accept="image/*" @change="chooseMeasureImage" /></label>
+                <div v-if="measureError" class="measure-error measure-file-error" role="alert">{{ measureError }}</div>
+                <div v-if="measurePreview" class="image-measure-workbench">
+                  <div class="image-preview image-measure-preview"><img :src="measurePreview" alt="待测量图片预览" /></div>
+                  <div class="image-controls">
+                    <div v-if="measureBusy" class="measure-status">正在读取图片尺寸…</div>
+                    <template v-else-if="measureDimensions">
+                      <div class="measurement-source"><strong>原图信息</strong><span>{{ formatMeasurementValue(measureDimensions.width, 0) }} × {{ formatMeasurementValue(measureDimensions.height, 0) }} px</span><small>{{ (measureDimensions.fileSize / 1024).toFixed(1) }} KB<span v-if="measureCalculation && !measureCalculation.error"> · 宽高比 {{ measureCalculation.aspectRatio }}</span></small></div>
+                      <label>DPI（每英寸像素）<input v-model="measureDpi" class="form-control" type="number" min="1" max="2400" step="1" /><span class="field-hint">96 DPI 适合屏幕预览，300 DPI 常用于打印。</span></label>
+                      <label>换算单位<select v-model="measureUnit" class="form-control"><option v-for="unit in MEASUREMENT_UNITS_LIST" :key="unit.value" :value="unit.value">{{ unit.label }}</option></select></label>
+                      <template v-if="measureCalculation && !measureCalculation.error">
+                        <div class="measurement-grid"><div><span>物理宽度</span><strong>{{ formatMeasurementValue(measureCalculation.physicalWidth) }} {{ measureCalculation.unit }}</strong></div><div><span>物理高度</span><strong>{{ formatMeasurementValue(measureCalculation.physicalHeight) }} {{ measureCalculation.unit }}</strong></div></div>
+                        <div class="result-callout"><CheckCircle2 :size="16" /><span>按 {{ measureCalculation.dpi }} DPI 换算 · {{ measureCalculation.unitLabel }}</span></div>
+                      </template>
+                      <div v-else class="measure-error" role="alert">{{ measureCalculation?.error }}</div>
+                    </template>
+                    <button class="outline-button" type="button" @click="clearMeasureImage"><RotateCcw :size="15" /> 重新测量</button>
+                  </div>
+                </div>
               </template>
 
               <template v-else>
