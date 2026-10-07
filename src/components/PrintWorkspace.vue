@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { Check, ChevronLeft, ChevronRight, FileOutput, Printer, RotateCcw, ShieldCheck, Upload, X } from 'lucide-vue-next'
 import { loadState, saveState } from '../services/storage'
 import { downloadBlob } from '../services/imageTools'
@@ -13,6 +13,7 @@ import {
   resolvePrintPages,
   savePrintSettings,
 } from '../services/printSettings'
+import { listLocalPrinters, printLocalFile } from '../services/printer'
 
 const props = defineProps({
   runtimeMode: { type: String, default: 'browser' },
@@ -34,9 +35,12 @@ const currentPage = ref(1)
 const loadingSource = ref(false)
 const printBusy = ref(false)
 const printError = ref('')
+const printers = ref([])
+const printerLoadBusy = ref(false)
 const previewFrame = ref(null)
 let sourceToken = 0
 let printFrame = null
+let printerLoadToken = 0
 
 const selectedPaper = computed(() => getPaperSize(settings))
 const effectiveOrientation = computed(() => settings.orientation === 'landscape' ? 'landscape' : 'portrait')
@@ -61,9 +65,35 @@ const previewPaperStyle = computed(() => ({
   '--print-paper-height': `${effectiveOrientation.value === 'landscape' ? selectedPaper.value.widthMm : selectedPaper.value.heightMm}mm`,
 }))
 const printStatusLabel = computed(() => props.runtimeMode === 'tauri' ? '桌面系统打印' : '浏览器系统打印')
+const defaultPrinter = computed(() => printers.value.find((printer) => printer.isDefault)?.name || '')
 
 function notify(message, type = 'info') {
   props.notify?.(message, type)
+}
+
+async function loadPrinters() {
+  if (props.runtimeMode !== 'tauri') return
+  const token = ++printerLoadToken
+  printerLoadBusy.value = true
+  try {
+    const result = await listLocalPrinters()
+    if (token !== printerLoadToken) return
+    printers.value = Array.isArray(result) ? result : []
+    if (settings.printerId && !printers.value.some((printer) => printer.name === settings.printerId)) {
+      settings.printerId = ''
+    }
+    if (!printers.value.length) {
+      printError.value = '未读取到本机打印机；打印时仍会尝试系统默认打印机'
+    } else if (printError.value === '未读取到本机打印机；打印时仍会尝试系统默认打印机') {
+      printError.value = ''
+    }
+  } catch (error) {
+    if (token !== printerLoadToken) return
+    printers.value = []
+    printError.value = error?.message || '无法读取本机打印机列表'
+  } finally {
+    if (token === printerLoadToken) printerLoadBusy.value = false
+  }
 }
 
 function updateSetting(key, value) {
@@ -215,7 +245,7 @@ function printHtmlSource() {
   window.setTimeout(cleanupPrintFrame, 10_000)
 }
 
-function printDocument() {
+async function printDocument() {
   if (loadingSource.value || printBusy.value) return
   if (!selectedPages.value.length) {
     printError.value = '请修正页码范围后再打印'
@@ -226,13 +256,30 @@ function printDocument() {
   emit('busy-change', true)
   printError.value = ''
   try {
-    if (sourceKind.value === 'pdf' && previewFrame.value?.contentWindow) {
-      previewFrame.value.contentWindow.focus()
-      previewFrame.value.contentWindow.print()
-    } else {
-      printHtmlSource()
+    let nativeSubmitted = false
+    if (props.runtimeMode === 'tauri' && sourceFile.value) {
+      try {
+        const result = await printLocalFile({
+          file: sourceFile.value,
+          fileName: sourceName.value,
+          printerName: settings.printerId,
+        })
+        nativeSubmitted = true
+        notify(`已调用本机打印处理程序：${result?.printerName || defaultPrinter.value || '系统默认打印机'}`)
+      } catch (error) {
+        printError.value = error?.message || '桌面原生打印接口不可用'
+        notify('桌面原生打印不可用，已回退浏览器打印', 'error')
+      }
     }
-    notify(`已提交打印：${selectedPaper.value.label} · ${pageSummary.value}`)
+    if (!nativeSubmitted) {
+      if (sourceKind.value === 'pdf' && previewFrame.value?.contentWindow) {
+        previewFrame.value.contentWindow.focus()
+        previewFrame.value.contentWindow.print()
+      } else {
+        printHtmlSource()
+      }
+      if (!printError.value) notify(`已提交打印：${selectedPaper.value.label} · ${pageSummary.value}`)
+    }
   } catch (error) {
     printError.value = error?.message || '无法打开系统打印对话框'
     notify(printError.value, 'error')
@@ -264,8 +311,13 @@ onMounted(() => {
   settingsHydrated.value = true
 })
 
+watch(() => props.runtimeMode, (value) => {
+  if (value === 'tauri') void loadPrinters()
+}, { immediate: true })
+
 onBeforeUnmount(() => {
   sourceToken += 1
+  printerLoadToken += 1
   revokeSourceUrl()
   cleanupPrintFrame()
   emit('busy-change', false)
@@ -280,7 +332,7 @@ onBeforeUnmount(() => {
           <div>
             <p class="eyebrow">文档办公</p>
             <h2 id="print-workspace-title">打印</h2>
-            <p>纸张、页面范围和缩放设置会保存在本机。</p>
+            <p>{{ runtimeMode === 'tauri' ? '桌面版会调用 Windows 本地打印接口；失败时回退浏览器打印。' : '纸张、页面范围和缩放设置会保存在本机。' }}</p>
           </div>
           <Printer :size="19" aria-hidden="true" />
         </div>
@@ -294,8 +346,8 @@ onBeforeUnmount(() => {
         <section class="print-setting-group" aria-labelledby="print-basic-title">
           <h3 id="print-basic-title">基本设置</h3>
           <div class="print-printer-row">
-            <label>打印机<select :value="settings.printerId" class="form-control" @change="updateSetting('printerId', $event.target.value)"><option value="">系统默认打印机</option></select></label>
-            <button class="outline-button" type="button" @click="notify('打印机属性由系统打印对话框提供')">属性</button>
+            <label>打印机<select :value="settings.printerId" class="form-control" @change="updateSetting('printerId', $event.target.value)"><option value="">系统默认打印机{{ defaultPrinter ? `（${defaultPrinter}）` : '' }}</option><option v-for="printer in printers" :key="printer.name" :value="printer.name">{{ printer.name }}{{ printer.isDefault ? '（默认）' : '' }}</option></select></label>
+            <button class="outline-button" type="button" :disabled="runtimeMode !== 'tauri' || printerLoadBusy" @click="loadPrinters">{{ printerLoadBusy ? '读取中…' : '刷新打印机' }}</button>
           </div>
           <div class="form-grid print-two-col">
             <label>打印份数<input :value="settings.copies" class="form-control" type="number" min="1" max="99" @input="updateSetting('copies', $event.target.value)" /></label>

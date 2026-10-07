@@ -17,6 +17,7 @@ use std::{
 };
 use tauri::Manager;
 
+mod printer;
 mod reminder;
 mod shutdown;
 
@@ -1532,6 +1533,8 @@ pub fn run() {
             relay_test_connection,
             relay_chat,
             read_ccswitch_providers,
+            printer::list_printers,
+            printer::print_file,
             reminder::reminder_scheduler_capabilities,
             reminder::reconcile_reminder_schedules,
             reminder::reminder_fire_context,
